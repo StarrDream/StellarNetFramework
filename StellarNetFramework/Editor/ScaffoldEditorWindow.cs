@@ -4,8 +4,8 @@
 // 职责：脚手架工具 EditorWindow 主体，负责所有 UI 绘制与用户交互。
 //       UI 层不承载任何生成逻辑，所有生成操作委托给对应 Generator。
 //       窗口状态通过 EditorPrefs 持久化，关闭后重新打开保留上次配置。
-//       侧边栏背景在 OnGUI 顶层用绝对坐标绘制，不参与 Layout 流，
-//       避免 GUILayoutUtility.GetRect 提前消耗垂直空间导致导航项不可见。
+//       侧边栏背景在 OnGUI 顶层用绝对坐标绘制，不参与 Layout 流。
+//       集成 ProtocolScanner 实现开发期协议 ID 查重与自动建议。
 // ════════════════════════════════════════════════════════════════
 
 using System.Collections.Generic;
@@ -18,7 +18,6 @@ namespace StellarNet.Editor.Scaffold
     public sealed class ScaffoldEditorWindow : EditorWindow
     {
         // ── 常量 ──────────────────────────────────────────────────
-
         private const float SidebarWidth = 190f;
         private const float NavItemHeight = 30f;
         private const float LabelWidth = 148f;
@@ -29,7 +28,6 @@ namespace StellarNet.Editor.Scaffold
         private const float FolderBtnWidth = 26f;
 
         // ── 菜单入口 ──────────────────────────────────────────────
-
         [MenuItem("StellarNet/Scaffold Tool")]
         private static void OpenWindow()
         {
@@ -39,7 +37,6 @@ namespace StellarNet.Editor.Scaffold
         }
 
         // ── 面板枚举 ──────────────────────────────────────────────
-
         private enum Panel
         {
             GlobalModule,
@@ -50,9 +47,7 @@ namespace StellarNet.Editor.Scaffold
         }
 
         // ── 运行时状态 ────────────────────────────────────────────
-
         private Panel _currentPanel = Panel.GlobalModule;
-
         private GlobalModuleConfig _globalConfig = new GlobalModuleConfig();
         private RoomComponentConfig _roomConfig = new RoomComponentConfig();
 
@@ -64,8 +59,8 @@ namespace StellarNet.Editor.Scaffold
         private readonly List<ProtoDefinition> _protoOnlyList = new List<ProtoDefinition>();
 
         private readonly List<BatchQueueItem> _batchQueue = new List<BatchQueueItem>();
-
         private readonly List<string> _logLines = new List<string>();
+
         private Vector2 _logScroll;
         private Vector2 _globalScroll;
         private Vector2 _roomScroll;
@@ -80,6 +75,7 @@ namespace StellarNet.Editor.Scaffold
         private RoomComponentGenerator _roomGenerator;
         private ProtoOnlyGenerator _protoOnlyGenerator;
         private InfrastructureInjector _injector;
+        private ProtocolScanner _protocolScanner; // 协议扫描器
 
         private string _clientInfraPath = "Game/Client/ClientInfrastructure.cs";
         private string _serverInfraPath = "Game/Server/GlobalInfrastructure.cs";
@@ -87,7 +83,6 @@ namespace StellarNet.Editor.Scaffold
         private string _clientRoomRegistryPath = "Game/Client/Room/ClientRoomComponentRegistry.cs";
 
         // ── 颜色 ──────────────────────────────────────────────────
-
         private static readonly Color ColSidebar = new Color(0.16f, 0.16f, 0.16f);
         private static readonly Color ColContent = new Color(0.20f, 0.20f, 0.20f);
         private static readonly Color ColNavActive = new Color(0.18f, 0.42f, 0.70f);
@@ -99,9 +94,9 @@ namespace StellarNet.Editor.Scaffold
         private static readonly Color ColLogError = new Color(0.95f, 0.40f, 0.35f);
         private static readonly Color ColLogWarn = new Color(0.95f, 0.78f, 0.30f);
         private static readonly Color ColLogOk = new Color(0.45f, 0.85f, 0.55f);
+        private static readonly Color ColConflict = new Color(0.45f, 0.15f, 0.15f); // 冲突行背景色
 
         // ── 样式缓存 ──────────────────────────────────────────────
-
         private GUIStyle _styleHeader;
         private GUIStyle _styleSectionLabel;
         private GUIStyle _styleNavLabel;
@@ -114,7 +109,6 @@ namespace StellarNet.Editor.Scaffold
         private bool _stylesReady;
 
         // ── Unity 生命周期 ────────────────────────────────────────
-
         private void OnEnable()
         {
             _fileWriteService = new FileWriteService();
@@ -122,17 +116,30 @@ namespace StellarNet.Editor.Scaffold
             _roomGenerator = new RoomComponentGenerator(_fileWriteService);
             _protoOnlyGenerator = new ProtoOnlyGenerator(_fileWriteService);
             _injector = new InfrastructureInjector();
+
+            // 初始化并执行全量扫描
+            _protocolScanner = new ProtocolScanner();
+            _protocolScanner.Scan();
+
             LoadPrefs();
         }
 
         private void OnDisable() => SavePrefs();
+
+        private void OnFocus()
+        {
+            // 窗口获得焦点时刷新扫描，确保获取最新的代码变动
+            if (_protocolScanner != null)
+            {
+                _protocolScanner.Scan();
+            }
+        }
 
         private void OnGUI()
         {
             BuildStyles();
 
             // 侧边栏与主内容区背景用绝对坐标绘制，完全脱离 Layout 流
-            // 不在此处调用 GUILayoutUtility.GetRect，防止消耗垂直布局空间
             EditorGUI.DrawRect(new Rect(0, 0, SidebarWidth, position.height), ColSidebar);
             EditorGUI.DrawRect(new Rect(SidebarWidth, 0, position.width - SidebarWidth, position.height), ColContent);
 
@@ -147,7 +154,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 样式构建
         // ══════════════════════════════════════════════════════════
-
         private void BuildStyles()
         {
             if (_stylesReady) return;
@@ -158,51 +164,43 @@ namespace StellarNet.Editor.Scaffold
                 normal = { textColor = new Color(0.90f, 0.90f, 0.90f) },
                 margin = new RectOffset(0, 0, 4, 2)
             };
-
             _styleSectionLabel = new GUIStyle(EditorStyles.boldLabel)
             {
                 fontSize = 10,
                 normal = { textColor = new Color(0.55f, 0.55f, 0.55f) }
             };
-
             _styleNavLabel = new GUIStyle(EditorStyles.label)
             {
                 fontSize = 12,
                 normal = { textColor = new Color(0.75f, 0.75f, 0.75f) },
                 alignment = TextAnchor.MiddleLeft
             };
-
             _styleNavLabelActive = new GUIStyle(_styleNavLabel)
             {
                 fontStyle = FontStyle.Bold,
                 normal = { textColor = Color.white }
             };
-
             _styleFieldLabel = new GUIStyle(EditorStyles.label)
             {
                 fontSize = 11,
                 normal = { textColor = new Color(0.72f, 0.82f, 0.95f) },
                 alignment = TextAnchor.MiddleLeft
             };
-
             _styleLogError = new GUIStyle(EditorStyles.label)
             {
                 fontSize = 11, wordWrap = true,
                 normal = { textColor = ColLogError }
             };
-
             _styleLogWarn = new GUIStyle(EditorStyles.label)
             {
                 fontSize = 11, wordWrap = true,
                 normal = { textColor = ColLogWarn }
             };
-
             _styleLogOk = new GUIStyle(EditorStyles.label)
             {
                 fontSize = 11, wordWrap = true,
                 normal = { textColor = ColLogOk }
             };
-
             _styleActionBg = new GUIStyle
             {
                 normal = { background = MakeTex(1, 1, new Color(0.14f, 0.14f, 0.14f)) }
@@ -214,13 +212,11 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 侧边栏
         // ══════════════════════════════════════════════════════════
-
         private void DrawSidebar()
         {
             EditorGUILayout.BeginVertical(GUILayout.Width(SidebarWidth));
             {
                 GUILayout.Space(14f);
-
                 DrawSidebarGroupLabel("模板类型");
                 DrawNavItem("全局模块", Panel.GlobalModule, new Color(0.30f, 0.80f, 0.70f));
                 DrawNavItem("房间业务组件", Panel.RoomComponent, new Color(0.78f, 0.52f, 0.78f));
@@ -233,7 +229,7 @@ namespace StellarNet.Editor.Scaffold
 
                 GUILayout.FlexibleSpace();
                 GUILayout.Label("StellarNet Scaffold", EditorStyles.centeredGreyMiniLabel);
-                GUILayout.Label("v1.0.0", EditorStyles.centeredGreyMiniLabel);
+                GUILayout.Label("v1.0.1", EditorStyles.centeredGreyMiniLabel);
                 GUILayout.Space(10f);
             }
             EditorGUILayout.EndVertical();
@@ -280,7 +276,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 主内容区分发
         // ══════════════════════════════════════════════════════════
-
         private void DrawMainContent()
         {
             EditorGUILayout.BeginVertical();
@@ -300,7 +295,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 全局模块面板
         // ══════════════════════════════════════════════════════════
-
         private void DrawGlobalModulePanel()
         {
             DrawPanelHeader("全局模块", "生成 Model + Handle 双端文件，Handle 自动注册到 GlobalMessageRegistrar。");
@@ -308,7 +302,6 @@ namespace StellarNet.Editor.Scaffold
             _globalScroll = EditorGUILayout.BeginScrollView(_globalScroll);
             {
                 GUILayout.Space(6f);
-
                 DrawSectionHeader("基础信息");
                 _globalConfig.ModuleName = DrawField("模块名称", _globalConfig.ModuleName, "例：Leaderboard");
                 _globalConfig.ClientNamespace = DrawField("客户端命名空间", _globalConfig.ClientNamespace);
@@ -317,7 +310,6 @@ namespace StellarNet.Editor.Scaffold
                 DrawEnumField("生成端", ref _globalConfig.Target);
 
                 DrawSectionHeader("输出路径");
-                // 路径字段使用文件夹选择器，选择后自动转换为相对 Assets/ 的路径
                 _globalConfig.ClientOutputPath = DrawFolderField("客户端输出路径", _globalConfig.ClientOutputPath);
                 _globalConfig.ServerOutputPath = DrawFolderField("服务端输出路径", _globalConfig.ServerOutputPath);
                 _globalConfig.ProtoOutputPath = DrawFolderField("协议输出路径", _globalConfig.ProtoOutputPath);
@@ -341,7 +333,6 @@ namespace StellarNet.Editor.Scaffold
                 {
                     DrawSectionHeader("Infrastructure 注入路径");
                     DrawInfoBox("目标文件中需包含锚点注释：// [SCAFFOLD_INJECT:{标记名}]");
-                    // 注入路径选择具体 .cs 文件，使用文件选择器
                     _clientInfraPath = DrawFileField("客户端 Infrastructure", _clientInfraPath);
                     _serverInfraPath = DrawFileField("服务端 Infrastructure", _serverInfraPath);
                 }
@@ -349,6 +340,7 @@ namespace StellarNet.Editor.Scaffold
                 DrawSectionHeader("协议配置");
                 _globalConfig.StartMessageId = DrawIntField("起始 MessageId", _globalConfig.StartMessageId,
                     "框架保留 0-9999，业务从 10000 起");
+
                 GUILayout.Space(4f);
                 DrawProtoList(_globalConfig.Protocols, ref _globalProtoScroll, _globalConfig.StartMessageId,
                     ProtoDirection.C2S_Global);
@@ -370,7 +362,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 房间组件面板
         // ══════════════════════════════════════════════════════════
-
         private void DrawRoomComponentPanel()
         {
             DrawPanelHeader("房间业务组件",
@@ -379,7 +370,6 @@ namespace StellarNet.Editor.Scaffold
             _roomScroll = EditorGUILayout.BeginScrollView(_roomScroll);
             {
                 GUILayout.Space(6f);
-
                 DrawSectionHeader("基础信息");
                 _roomConfig.ComponentName = DrawField("组件名称", _roomConfig.ComponentName, "例：TurnSystem");
                 _roomConfig.StableComponentId = DrawField("StableComponentId", _roomConfig.StableComponentId,
@@ -421,6 +411,7 @@ namespace StellarNet.Editor.Scaffold
 
                 DrawSectionHeader("协议配置");
                 _roomConfig.StartMessageId = DrawIntField("起始 MessageId", _roomConfig.StartMessageId, "建议按组件划分号段");
+
                 GUILayout.Space(4f);
                 DrawProtoList(_roomConfig.Protocols, ref _roomProtoScroll, _roomConfig.StartMessageId,
                     ProtoDirection.C2S_Room);
@@ -442,7 +433,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 协议定义面板
         // ══════════════════════════════════════════════════════════
-
         private void DrawProtoOnlyPanel()
         {
             DrawPanelHeader("协议定义", "独立生成协议聚合文件，适合先规划协议再实现业务的开发流程。");
@@ -450,7 +440,6 @@ namespace StellarNet.Editor.Scaffold
             _protoScroll = EditorGUILayout.BeginScrollView(_protoScroll);
             {
                 GUILayout.Space(6f);
-
                 DrawSectionHeader("基础信息");
                 _protoOnlyFileName = DrawField("文件名", _protoOnlyFileName, "不含 .cs 扩展名");
                 _protoOnlyModuleName = DrawField("模块名", _protoOnlyModuleName, "用于文件头注释");
@@ -491,7 +480,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 批量生成面板
         // ══════════════════════════════════════════════════════════
-
         private void DrawBatchPanel()
         {
             DrawPanelHeader("批量生成", "将多个模块加入队列后统一生成，适合新项目初始化时一次性创建多个模块。");
@@ -500,7 +488,6 @@ namespace StellarNet.Editor.Scaffold
             _batchScroll = EditorGUILayout.BeginScrollView(_batchScroll);
             {
                 GUILayout.Space(6f);
-
                 DrawSectionHeader("待生成队列");
 
                 if (_batchQueue.Count == 0)
@@ -532,6 +519,7 @@ namespace StellarNet.Editor.Scaffold
                             GUILayout.Label(GetItemTypeLabel(item.Type), GUILayout.Width(90f));
                             GUILayout.Label(GetTargetLabel(item), GUILayout.Width(80f));
                             GUILayout.Label(GetStatusLabel(item.Status), GUILayout.Width(70f));
+
                             GUI.backgroundColor = new Color(0.75f, 0.25f, 0.25f);
                             if (GUILayout.Button("移除", GUILayout.Width(44f)))
                                 removeIndex = i;
@@ -570,8 +558,10 @@ namespace StellarNet.Editor.Scaffold
                 }
 
                 GUI.backgroundColor = Color.white;
+
                 GUILayout.FlexibleSpace();
                 GUILayout.Label($"队列中共 {_batchQueue.Count} 个任务", EditorStyles.miniLabel);
+
                 GUILayout.Space(8f);
                 GUI.backgroundColor = new Color(0.22f, 0.52f, 0.85f);
                 if (GUILayout.Button("执行批量生成", GUILayout.Width(100f), GUILayout.Height(28f)))
@@ -585,7 +575,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 生成日志面板
         // ══════════════════════════════════════════════════════════
-
         private void DrawLogPanel()
         {
             DrawPanelHeader("生成日志", "记录每次生成操作的详细结果，包含写入文件路径、警告与错误信息。");
@@ -600,7 +589,6 @@ namespace StellarNet.Editor.Scaffold
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(4f);
-
             _logScroll = EditorGUILayout.BeginScrollView(_logScroll,
                 EditorStyles.helpBox, GUILayout.ExpandHeight(true));
             {
@@ -623,15 +611,28 @@ namespace StellarNet.Editor.Scaffold
         }
 
         // ══════════════════════════════════════════════════════════
-        // 协议列表通用绘制
+        // 协议列表通用绘制（集成 ProtocolScanner）
         // ══════════════════════════════════════════════════════════
-
         private void DrawProtoList(
             List<ProtoDefinition> protos,
             ref Vector2 scroll,
             int startId,
             ProtoDirection defaultDir)
         {
+            // 获取建议的下一个可用 ID
+            int suggestedId = _protocolScanner.GetNextAvailableId(startId);
+
+            EditorGUILayout.BeginHorizontal();
+            {
+                GUILayout.Label($"建议可用 ID: {suggestedId}", EditorStyles.miniLabel);
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("刷新扫描", EditorStyles.miniButton, GUILayout.Width(60)))
+                {
+                    _protocolScanner.Scan();
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
             {
                 GUILayout.Label("MessageId", EditorStyles.toolbarButton, GUILayout.Width(85f));
@@ -648,15 +649,31 @@ namespace StellarNet.Editor.Scaffold
                 for (int i = 0; i < protos.Count; i++)
                 {
                     var p = protos[i];
-                    Rect rowRect = EditorGUILayout.BeginHorizontal(GUILayout.Height(20f));
-                    EditorGUI.DrawRect(rowRect, i % 2 == 0
-                        ? new Color(0.21f, 0.21f, 0.21f)
-                        : new Color(0.18f, 0.18f, 0.18f));
+
+                    // 检查 ID 冲突：是否已被工程中其他协议占用
+                    bool isConflict = _protocolScanner.UsedIds.Contains(p.MessageId);
+
+                    // 设置行背景色：冲突显示红色，否则显示交替色
+                    Color rowColor;
+                    if (isConflict)
                     {
-                        p.MessageId = EditorGUILayout.IntField(p.MessageId, GUILayout.Width(85f));
+                        rowColor = ColConflict;
+                    }
+                    else
+                    {
+                        rowColor = i % 2 == 0 ? new Color(0.21f, 0.21f, 0.21f) : new Color(0.18f, 0.18f, 0.18f);
+                    }
+
+                    Rect rowRect = EditorGUILayout.BeginHorizontal(GUILayout.Height(20f));
+                    EditorGUI.DrawRect(rowRect, rowColor);
+                    {
+                        int newId = EditorGUILayout.IntField(p.MessageId, GUILayout.Width(85f));
+                        if (newId != p.MessageId) p.MessageId = newId;
+
                         p.ClassName = EditorGUILayout.TextField(p.ClassName, GUILayout.Width(200f));
                         p.Direction = (ProtoDirection)EditorGUILayout.EnumPopup(p.Direction, GUILayout.Width(115f));
                         p.Comment = EditorGUILayout.TextField(p.Comment);
+
                         GUI.backgroundColor = new Color(0.75f, 0.25f, 0.25f);
                         if (GUILayout.Button("X", GUILayout.Width(22f)))
                             removeIndex = i;
@@ -676,14 +693,22 @@ namespace StellarNet.Editor.Scaffold
                 GUI.backgroundColor = new Color(0.25f, 0.55f, 0.35f);
                 if (GUILayout.Button("+ 添加协议", GUILayout.Width(90f), GUILayout.Height(22f)))
                 {
-                    int nextId = startId;
+                    // 自动分配不冲突的 ID
+                    int nextId = _protocolScanner.GetNextAvailableId(startId);
+                    // 还要避开当前列表中已有的 ID，防止同次生成内冲突
                     foreach (var p in protos)
-                        if (p.MessageId >= nextId)
-                            nextId = p.MessageId + 1;
+                    {
+                        if (p.MessageId >= nextId) nextId = p.MessageId + 1;
+                    }
+
+                    // 再次检查 Scanner，确保 +1 后没有撞上已有的
+                    nextId = _protocolScanner.GetNextAvailableId(nextId);
+
                     protos.Add(new ProtoDefinition(nextId, "C2S_NewMessage", defaultDir));
                 }
 
                 GUI.backgroundColor = Color.white;
+
                 if (protos.Count > 0)
                     GUILayout.Label($"共 {protos.Count} 条", EditorStyles.miniLabel);
             }
@@ -693,13 +718,13 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 生成执行逻辑
         // ══════════════════════════════════════════════════════════
-
         private void ExecuteGlobalGenerate()
         {
             _fileWriteService.Clear();
             var result = new GenerateResult();
 
-            if (!ScaffoldValidator.ValidateGlobalModule(_globalConfig, result))
+            // 传入 _protocolScanner 进行全量防重校验
+            if (!ScaffoldValidator.ValidateGlobalModule(_globalConfig, _protocolScanner, result))
             {
                 FlushResultToLog(result, "全局模块");
                 _currentPanel = Panel.Log;
@@ -716,6 +741,7 @@ namespace StellarNet.Editor.Scaffold
 
             _fileWriteService.FlushAll(result);
             result.Success = result.Errors.Count == 0;
+
             FlushResultToLog(result, "全局模块");
             _currentPanel = Panel.Log;
 
@@ -732,7 +758,8 @@ namespace StellarNet.Editor.Scaffold
             _fileWriteService.Clear();
             var result = new GenerateResult();
 
-            if (!ScaffoldValidator.ValidateRoomComponent(_roomConfig, result))
+            // 传入 _protocolScanner 进行全量防重校验
+            if (!ScaffoldValidator.ValidateRoomComponent(_roomConfig, _protocolScanner, result))
             {
                 FlushResultToLog(result, "房间组件");
                 _currentPanel = Panel.Log;
@@ -749,6 +776,7 @@ namespace StellarNet.Editor.Scaffold
 
             _fileWriteService.FlushAll(result);
             result.Success = result.Errors.Count == 0;
+
             FlushResultToLog(result, "房间组件");
             _currentPanel = Panel.Log;
 
@@ -765,12 +793,32 @@ namespace StellarNet.Editor.Scaffold
             _fileWriteService.Clear();
             var result = new GenerateResult();
 
+            // ProtoOnly 暂未封装统一 Validator，此处手动简单校验一下 ID 冲突
+            // 实际工程建议也封装进 ScaffoldValidator
+            bool hasConflict = false;
+            foreach (var p in _protoOnlyList)
+            {
+                if (_protocolScanner.UsedIds.Contains(p.MessageId))
+                {
+                    result.AddError($"协议 ID {p.MessageId} 已被现有代码占用，请修改。");
+                    hasConflict = true;
+                }
+            }
+
+            if (hasConflict)
+            {
+                FlushResultToLog(result, "协议定义（前置校验）");
+                _currentPanel = Panel.Log;
+                return;
+            }
+
             _protoOnlyGenerator.Generate(
                 _protoOnlyFileName, _protoOnlyOutputPath, _protoOnlyNamespace,
                 _protoOnlyModuleName, _protoOnlyDomain, _protoOnlyList, result);
 
             _fileWriteService.FlushAll(result);
             result.Success = result.Errors.Count == 0;
+
             FlushResultToLog(result, "协议定义");
             _currentPanel = Panel.Log;
 
@@ -796,7 +844,8 @@ namespace StellarNet.Editor.Scaffold
 
             var batchResult = new GenerateResult();
 
-            if (!ScaffoldValidator.ValidateBatchQueue(_batchQueue, batchResult))
+            // 传入 _protocolScanner 进行全量防重校验
+            if (!ScaffoldValidator.ValidateBatchQueue(_batchQueue, _protocolScanner, batchResult))
             {
                 FlushResultToLog(batchResult, "批量生成（前置校验）");
                 _currentPanel = Panel.Log;
@@ -850,11 +899,11 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 批量队列辅助
         // ══════════════════════════════════════════════════════════
-
         private void AddGlobalToBatch()
         {
             var r = new GenerateResult();
-            if (!ScaffoldValidator.ValidateGlobalModule(_globalConfig, r))
+            // 加入队列前也进行一次校验，包含 ID 查重
+            if (!ScaffoldValidator.ValidateGlobalModule(_globalConfig, _protocolScanner, r))
             {
                 EditorUtility.DisplayDialog("配置校验失败",
                     "当前全局模块配置存在错误，请修正后再加入队列。\n" + string.Join("\n", r.Errors), "确认");
@@ -874,7 +923,8 @@ namespace StellarNet.Editor.Scaffold
         private void AddRoomToBatch()
         {
             var r = new GenerateResult();
-            if (!ScaffoldValidator.ValidateRoomComponent(_roomConfig, r))
+            // 加入队列前也进行一次校验，包含 ID 查重
+            if (!ScaffoldValidator.ValidateRoomComponent(_roomConfig, _protocolScanner, r))
             {
                 EditorUtility.DisplayDialog("配置校验失败",
                     "当前房间组件配置存在错误，请修正后再加入队列。\n" + string.Join("\n", r.Errors), "确认");
@@ -894,7 +944,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 日志写入
         // ══════════════════════════════════════════════════════════
-
         private void FlushResultToLog(GenerateResult result, string context)
         {
             _logLines.Add($"─── {context} 生成结果 [{System.DateTime.Now:HH:mm:ss}] ───");
@@ -902,19 +951,21 @@ namespace StellarNet.Editor.Scaffold
             foreach (var w in result.Warnings) _logLines.Add($"[WARN]  {w}");
             foreach (var f in result.WrittenFiles) _logLines.Add($"[OK]    写入：{f}");
             foreach (var f in result.ModifiedFiles) _logLines.Add($"[OK]    修改：{f}");
+
             if (result.Errors.Count == 0 && result.Warnings.Count == 0)
                 _logLines.Add("[OK]    生成完成，无错误无警告。");
+
             _logLines.Add("");
         }
 
         // ══════════════════════════════════════════════════════════
         // UI 通用组件
         // ══════════════════════════════════════════════════════════
-
         private void DrawPanelHeader(string title, string desc)
         {
             Rect topBar = GUILayoutUtility.GetRect(0f, 3f, GUILayout.ExpandWidth(true));
             EditorGUI.DrawRect(topBar, ColNavActive);
+
             GUILayout.Space(10f);
             EditorGUILayout.BeginHorizontal();
             {
@@ -927,6 +978,7 @@ namespace StellarNet.Editor.Scaffold
                 EditorGUILayout.EndVertical();
             }
             EditorGUILayout.EndHorizontal();
+
             GUILayout.Space(6f);
             DrawDivider();
             GUILayout.Space(4f);
@@ -947,9 +999,6 @@ namespace StellarNet.Editor.Scaffold
             EditorGUI.DrawRect(r, ColDivider);
         }
 
-        /// <summary>
-        /// 普通文本字段，Label + TextField 两列布局，垂直排列不受外部 Horizontal 影响。
-        /// </summary>
         private string DrawField(string label, string value, string tooltip = "")
         {
             EditorGUILayout.BeginHorizontal(GUILayout.Height(22f));
@@ -961,34 +1010,23 @@ namespace StellarNet.Editor.Scaffold
             return result;
         }
 
-        /// <summary>
-        /// 文件夹路径字段，右侧附带「...」按钮，点击后弹出系统文件夹选择器。
-        /// 选择结果自动转换为相对 Assets/ 的路径写回字段。
-        /// 若用户选择了 Assets 目录之外的路径，弹出警告并保留原值。
-        /// </summary>
         private string DrawFolderField(string label, string value, string tooltip = "")
         {
             EditorGUILayout.BeginHorizontal(GUILayout.Height(22f));
             GUILayout.Space(10f);
             GUILayout.Label(new GUIContent(label, tooltip), _styleFieldLabel, GUILayout.Width(LabelWidth));
             string newValue = EditorGUILayout.TextField(value);
-
             if (GUILayout.Button("...", GUILayout.Width(FolderBtnWidth), GUILayout.Height(18f)))
             {
-                // 计算当前路径对应的绝对路径作为初始目录，方便用户快速定位
                 string initPath = string.IsNullOrEmpty(value)
                     ? Application.dataPath
                     : Path.Combine(Application.dataPath, value).Replace('\\', '/');
-
                 string selected = EditorUtility.OpenFolderPanel("选择输出目录", initPath, "");
-
                 if (!string.IsNullOrEmpty(selected))
                 {
-                    // 将绝对路径转换为相对 Assets/ 的路径
                     string relative = AbsToRelative(selected);
                     if (relative == null)
                     {
-                        // 选择了 Assets 目录之外的路径，不允许使用
                         EditorUtility.DisplayDialog("路径非法",
                             "输出目录必须位于当前项目的 Assets 目录内，请重新选择。", "确认");
                     }
@@ -1004,25 +1042,18 @@ namespace StellarNet.Editor.Scaffold
             return newValue;
         }
 
-        /// <summary>
-        /// 文件路径字段，右侧附带「...」按钮，点击后弹出系统文件选择器（用于选择 .cs 文件）。
-        /// 选择结果自动转换为相对 Assets/ 的路径写回字段。
-        /// </summary>
         private string DrawFileField(string label, string value, string tooltip = "")
         {
             EditorGUILayout.BeginHorizontal(GUILayout.Height(22f));
             GUILayout.Space(10f);
             GUILayout.Label(new GUIContent(label, tooltip), _styleFieldLabel, GUILayout.Width(LabelWidth));
             string newValue = EditorGUILayout.TextField(value);
-
             if (GUILayout.Button("...", GUILayout.Width(FolderBtnWidth), GUILayout.Height(18f)))
             {
                 string initDir = string.IsNullOrEmpty(value)
                     ? Application.dataPath
                     : Path.GetDirectoryName(Path.Combine(Application.dataPath, value).Replace('\\', '/'));
-
                 string selected = EditorUtility.OpenFilePanel("选择目标文件", initDir, "cs");
-
                 if (!string.IsNullOrEmpty(selected))
                 {
                     string relative = AbsToRelative(selected);
@@ -1122,8 +1153,10 @@ namespace StellarNet.Editor.Scaffold
                 GUILayout.Space(10f);
                 if (GUILayout.Button(resetLabel, GUILayout.Width(70f), GUILayout.Height(28f)))
                     onReset?.Invoke();
+
                 GUILayout.FlexibleSpace();
                 GUILayout.Label(statusText, EditorStyles.miniLabel);
+
                 GUILayout.Space(8f);
                 GUI.backgroundColor = new Color(0.22f, 0.52f, 0.85f);
                 if (GUILayout.Button(confirmLabel, GUILayout.Width(90f), GUILayout.Height(28f)))
@@ -1142,25 +1175,14 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 路径转换工具
         // ══════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// 将绝对路径转换为相对 Assets/ 的路径。
-        /// 若路径不在 Assets 目录内则返回 null，由调用方决定如何处理。
-        /// 路径分隔符统一转换为正斜杠，与 Unity AssetDatabase 风格保持一致。
-        /// </summary>
         private static string AbsToRelative(string absPath)
         {
             if (string.IsNullOrEmpty(absPath))
                 return null;
-
-            // 统一分隔符，避免 Windows 与 macOS 路径格式差异
             string normalized = absPath.Replace('\\', '/');
             string assetsRoot = Application.dataPath.Replace('\\', '/');
-
             if (!normalized.StartsWith(assetsRoot))
                 return null;
-
-            // 去掉 assetsRoot 前缀与紧跟的斜杠，得到相对于 Assets/ 的路径
             string relative = normalized.Substring(assetsRoot.Length).TrimStart('/');
             return relative;
         }
@@ -1168,7 +1190,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 文件数量预估
         // ══════════════════════════════════════════════════════════
-
         private static int EstimateGlobalFileCount(GlobalModuleConfig cfg)
         {
             int c = 0;
@@ -1198,7 +1219,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 标签辅助
         // ══════════════════════════════════════════════════════════
-
         private static string GetItemTypeLabel(BatchQueueItem.ItemType t) => t switch
         {
             BatchQueueItem.ItemType.GlobalModule => "全局模块",
@@ -1232,7 +1252,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 深拷贝
         // ══════════════════════════════════════════════════════════
-
         private static GlobalModuleConfig DeepCopyGlobalConfig(GlobalModuleConfig src)
         {
             var dst = new GlobalModuleConfig
@@ -1295,12 +1314,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // 工具方法
         // ══════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// 创建纯色 Texture2D，用于 GUIStyle.normal.background。
-        /// 必须在 OnGUI 线程内调用，不可在静态初始化或 OnEnable 中调用，
-        /// 否则 Unity 尚未完成渲染上下文初始化会导致 Texture 创建失败。
-        /// </summary>
         private static Texture2D MakeTex(int w, int h, Color col)
         {
             var tex = new Texture2D(w, h);
@@ -1315,7 +1328,6 @@ namespace StellarNet.Editor.Scaffold
         // ══════════════════════════════════════════════════════════
         // EditorPrefs 持久化
         // ══════════════════════════════════════════════════════════
-
         private const string PrefKeyClientInfra = "StellarScaffold_ClientInfraPath";
         private const string PrefKeyServerInfra = "StellarScaffold_ServerInfraPath";
         private const string PrefKeyServerRoomReg = "StellarScaffold_ServerRoomRegPath";
@@ -1342,13 +1354,11 @@ namespace StellarNet.Editor.Scaffold
 
         private void SavePrefs()
         {
-            // Infrastructure 注入路径
             EditorPrefs.SetString(PrefKeyClientInfra, _clientInfraPath);
             EditorPrefs.SetString(PrefKeyServerInfra, _serverInfraPath);
             EditorPrefs.SetString(PrefKeyServerRoomReg, _serverRoomRegistryPath);
             EditorPrefs.SetString(PrefKeyClientRoomReg, _clientRoomRegistryPath);
 
-            // 全局模块
             EditorPrefs.SetString(PrefKeyGlobalModuleName, _globalConfig.ModuleName);
             EditorPrefs.SetString(PrefKeyGlobalClientNs, _globalConfig.ClientNamespace);
             EditorPrefs.SetString(PrefKeyGlobalServerNs, _globalConfig.ServerNamespace);
@@ -1357,7 +1367,6 @@ namespace StellarNet.Editor.Scaffold
             EditorPrefs.SetString(PrefKeyGlobalServerPath, _globalConfig.ServerOutputPath);
             EditorPrefs.SetString(PrefKeyGlobalProtoPath, _globalConfig.ProtoOutputPath);
 
-            // 房间组件
             EditorPrefs.SetString(PrefKeyRoomCompName, _roomConfig.ComponentName);
             EditorPrefs.SetString(PrefKeyRoomStableId, _roomConfig.StableComponentId);
             EditorPrefs.SetString(PrefKeyRoomServerNs, _roomConfig.ServerNamespace);
@@ -1367,7 +1376,6 @@ namespace StellarNet.Editor.Scaffold
             EditorPrefs.SetString(PrefKeyRoomClientPath, _roomConfig.ClientOutputPath);
             EditorPrefs.SetString(PrefKeyRoomProtoPath, _roomConfig.ProtoOutputPath);
 
-            // 协议定义面板
             EditorPrefs.SetString(PrefKeyProtoFileName, _protoOnlyFileName);
             EditorPrefs.SetString(PrefKeyProtoOutputPath, _protoOnlyOutputPath);
             EditorPrefs.SetString(PrefKeyProtoNamespace, _protoOnlyNamespace);
