@@ -425,7 +425,8 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
         {
             return new[]
             {
-                ServerRoomBaseSettingsComponent.StableComponentId
+                // 由于 Component 已被删除，这里改为引用 Handle 的 StableComponentId
+                ServerRoomBaseSettingsHandle.StableComponentId
             };
         }
 

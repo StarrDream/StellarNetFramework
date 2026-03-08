@@ -20,14 +20,12 @@ namespace StellarNet.Server.Room
     public sealed class RoomInstance
     {
         // ── 基础标识 ─────────────────────────────────────────────────
-
         /// <summary>
         /// 房间唯一标识，是房间隔离、消息路由、重连恢复、录制归档的关键上下文标识。
         /// </summary>
         public string RoomId { get; }
 
         // ── 生命周期状态 ──────────────────────────────────────────────
-
         /// <summary>
         /// 当前框架对象运行态，只用于框架对象管理，不等于房间业务主生命周期。
         /// </summary>
@@ -39,7 +37,6 @@ namespace StellarNet.Server.Room
         public RoomBusinessPhase BusinessPhase { get; private set; }
 
         // ── 成员管理（严格分离两类集合）─────────────────────────────
-
         /// <summary>
         /// 成员身份集合：表示哪些 SessionId 逻辑上属于该房间。
         /// 断线后成员仍可保留其成员归属，房间成员归属判断针对此集合。
@@ -55,7 +52,6 @@ namespace StellarNet.Server.Room
             = new Dictionary<string, ConnectionId>();
 
         // ── 框架基础设施 ──────────────────────────────────────────────
-
         /// <summary>
         /// 房间作用域服务定位器，只用于单个房间作用域内服务寻址。
         /// </summary>
@@ -83,7 +79,6 @@ namespace StellarNet.Server.Room
         public ReplayRecorder ReplayRecorder { get; private set; }
 
         // ── 房间内 Tick 计数器 ────────────────────────────────────────
-
         /// <summary>
         /// 房间内相对 Tick 计数，从 0 开始，每次 Tick 递增。
         /// 录制文件中的 Tick 表示此相对 Tick，不是服务端全局 Tick。
@@ -91,15 +86,19 @@ namespace StellarNet.Server.Room
         public int CurrentTick { get; private set; }
 
         // ── 房间业务组件列表（由装配器写入）─────────────────────────
-
         /// <summary>
         /// 已装配的房间业务组件列表，由 ServerRoomAssembler 在装配阶段写入。
         /// 装配顺序即组件列表顺序，生命周期回调按此顺序分发。
         /// </summary>
         private readonly List<IRoomComponent> _components = new List<IRoomComponent>();
 
-        // ── 空置超时计时 ──────────────────────────────────────────────
+        /// <summary>
+        /// 已装配的组件 ID 清单，用于重连恢复下发与回放文件头写入。
+        /// 由 ServerRoomAssembler 在装配完成后注入。
+        /// </summary>
+        private string[] _componentIds = new string[0];
 
+        // ── 空置超时计时 ──────────────────────────────────────────────
         private float _emptyStartTime = -1f;
 
         public RoomInstance(string roomId, IRoomSettings settings)
@@ -129,7 +128,6 @@ namespace StellarNet.Server.Room
         }
 
         // ── 装配器专用接口 ────────────────────────────────────────────
-
         /// <summary>
         /// 由 ServerRoomAssembler 在装配完成后调用，将房间状态从 Initializing 推进到 Running。
         /// 装配失败时不得调用此方法。
@@ -177,6 +175,29 @@ namespace StellarNet.Server.Room
         }
 
         /// <summary>
+        /// 注入已装配的组件 ID 清单，由 ServerRoomAssembler 在装配完成后调用。
+        /// </summary>
+        public void SetComponentIds(string[] componentIds)
+        {
+            if (LifecycleState != RoomLifecycleState.Initializing)
+            {
+                Debug.LogError($"[RoomInstance] SetComponentIds 失败：只允许在 Initializing 阶段调用，RoomId={RoomId}。");
+                return;
+            }
+
+            _componentIds = componentIds ?? new string[0];
+        }
+
+        /// <summary>
+        /// 获取当前房间已装配的组件 ID 清单。
+        /// 用于重连恢复下发与回放文件头写入。
+        /// </summary>
+        public string[] GetComponentIds()
+        {
+            return _componentIds;
+        }
+
+        /// <summary>
         /// 挂载回放录制器，只有当前房间策略启用录制时才调用。
         /// 只允许在 Initializing 阶段挂载。
         /// </summary>
@@ -199,7 +220,6 @@ namespace StellarNet.Server.Room
         }
 
         // ── 成员管理接口 ──────────────────────────────────────────────
-
         /// <summary>
         /// 将 SessionId 加入成员身份集合，并建立在线连接映射。
         /// 成员身份集合与在线连接映射分别维护，不得混用。
@@ -214,7 +234,6 @@ namespace StellarNet.Server.Room
             }
 
             _memberSessionIds.Add(sessionId);
-
             if (connectionId.IsValid)
             {
                 _onlineConnections[sessionId] = connectionId;
@@ -320,7 +339,6 @@ namespace StellarNet.Server.Room
         public int MemberCount => _memberSessionIds.Count;
 
         // ── 业务阶段推进接口 ──────────────────────────────────────────
-
         /// <summary>
         /// 推进房间业务阶段到等待开始，由房间调度模块在房间创建完成后调用。
         /// </summary>
@@ -351,7 +369,6 @@ namespace StellarNet.Server.Room
             }
 
             BusinessPhase = RoomBusinessPhase.InGame;
-
             // 通知录制器游戏正式开始，录制从此刻启用
             ReplayRecorder?.OnGameStarted();
             DispatchOnRoomStartGame();
@@ -370,7 +387,6 @@ namespace StellarNet.Server.Room
             }
 
             BusinessPhase = RoomBusinessPhase.GameEnding;
-
             // 通知录制器游戏已结束，停止录制
             ReplayRecorder?.OnGameEnded();
             DispatchOnRoomGameEnding();
@@ -393,7 +409,6 @@ namespace StellarNet.Server.Room
         }
 
         // ── Tick 驱动 ─────────────────────────────────────────────────
-
         /// <summary>
         /// 房间主循环 Tick，由 GlobalRoomManager 统一驱动。
         /// 房间实例从创建成功后即可进入持续 Tick，一直运行到房间销毁。
@@ -409,7 +424,6 @@ namespace StellarNet.Server.Room
             }
 
             CurrentTick++;
-
             // 分发 Tick 给所有已装配的业务组件
             for (int i = 0; i < _components.Count; i++)
             {
@@ -418,7 +432,6 @@ namespace StellarNet.Server.Room
         }
 
         // ── 销毁流程 ──────────────────────────────────────────────────
-
         /// <summary>
         /// 触发房间销毁流程。
         /// 一旦进入 Destroying 状态，后续重复销毁请求只输出 Warning 并立即返回。
@@ -446,13 +459,10 @@ namespace StellarNet.Server.Room
 
             // 清理房间域事件总线，确保销毁后不残留旧订阅
             EventBus.Clear();
-
             // 清理房间域消息路由器
             MessageRouter.ClearAll();
-
             // 清理房间作用域服务定位器
             RoomServiceLocator.Clear();
-
             // 录制器收尾（若已挂载）
             ReplayRecorder?.Finalize();
 
@@ -466,7 +476,6 @@ namespace StellarNet.Server.Room
         }
 
         // ── 空置超时检测 ──────────────────────────────────────────────
-
         /// <summary>
         /// 由 GlobalRoomManager 在 Tick 中调用，检测房间是否已超过空置超时时长。
         /// 房间空置超时判断针对"当前在线连接映射是否为空"，不针对成员身份集合。
@@ -490,7 +499,6 @@ namespace StellarNet.Server.Room
         }
 
         // ── 生命周期回调分发（按装配顺序）───────────────────────────
-
         /// <summary>
         /// 分发房间创建回调，由 ServerRoomAssembler 在装配完成后调用。
         /// </summary>

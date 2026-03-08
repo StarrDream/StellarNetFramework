@@ -82,6 +82,7 @@ namespace StellarNet.Server.Room
             if (componentIds == null || componentIds.Length == 0)
             {
                 Debug.LogWarning($"[ServerRoomAssembler] Assemble 警告：componentIds 为空，RoomId={room.RoomId}，将创建无业务组件的基础空房间。");
+                room.SetComponentIds(new string[0]); // 注入空列表
                 room.MarkRunning();
                 room.DispatchOnRoomCreate();
                 return true;
@@ -94,11 +95,9 @@ namespace StellarNet.Server.Room
             }
 
             var assembleRecords = new List<AssembleRecord>();
-
             for (int i = 0; i < componentIds.Length; i++)
             {
                 string componentId = componentIds[i];
-
                 // 步骤 1：通过注册表创建组件实例
                 var rawComponent = registry.CreateComponent(componentId, room);
                 if (rawComponent == null)
@@ -160,6 +159,9 @@ namespace StellarNet.Server.Room
                 assembleRecords.Add(record);
             }
 
+            // 注入组件 ID 清单到 RoomInstance，供重连恢复与回放使用
+            room.SetComponentIds(componentIds);
+
             // 所有组件装配成功，推进 RoomInstance 到 Running 状态
             room.MarkRunning();
 
@@ -172,7 +174,6 @@ namespace StellarNet.Server.Room
 
             // 分发 OnRoomCreate 回调给所有已装配组件
             room.DispatchOnRoomCreate();
-
             Debug.Log($"[ServerRoomAssembler] 房间装配成功，RoomId={room.RoomId}，组件数量={assembleRecords.Count}。");
             return true;
         }
@@ -185,7 +186,6 @@ namespace StellarNet.Server.Room
         private void Rollback(RoomInstance room, List<AssembleRecord> records)
         {
             Debug.Log($"[ServerRoomAssembler] 开始原子回滚，RoomId={room.RoomId}，已装配组件数={records.Count}。");
-
             // 按装配逆序执行回滚
             for (int i = records.Count - 1; i >= 0; i--)
             {

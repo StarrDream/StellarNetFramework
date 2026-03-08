@@ -6,11 +6,8 @@ using UnityEngine;
 namespace StellarNet.Client.GlobalModules.RoomDispatcher
 {
     /// <summary>
-    /// 客户端房间调度模块 Handle，处理建房、加房结果与当前过渡阶段下的成员变化通知。
-    /// 说明：
-    ///   S2C_MemberJoined / S2C_MemberLeft 已经归属房间基础设置组件协议，
-    ///   这里只是为了兼容当前客户端尚未落地房间基础设置组件 Handle 的过渡接法。
-    ///   待客户端房间基础设置组件 Handle 落地后，应将这两个协议监听迁移出去。
+    /// 客户端房间调度模块 Handle，处理建房、加房结果。
+    /// 修复：移除了属于房间域的成员变动协议监听，严格遵守全局域/房间域边界。
     /// </summary>
     public sealed class ClientRoomDispatcherHandle
     {
@@ -23,8 +20,6 @@ namespace StellarNet.Client.GlobalModules.RoomDispatcher
         public event System.Action<string, string[]> OnJoinRoomSucceeded;
         public event System.Action<string> OnJoinRoomFailed;
         public event System.Action OnLeaveRoomSucceeded;
-        public event System.Action<string> OnMemberJoined;
-        public event System.Action<string, string> OnMemberLeft;
 
         public ClientRoomDispatcherHandle(
             ClientRoomDispatcherModel model,
@@ -58,18 +53,14 @@ namespace StellarNet.Client.GlobalModules.RoomDispatcher
         {
             _registrar
                 .Register<S2C_CreateRoomResult>(OnS2C_CreateRoomResult)
-                .Register<S2C_JoinRoomResult>(OnS2C_JoinRoomResult)
-                .Register<S2C_MemberJoined>(OnS2C_MemberJoined)
-                .Register<S2C_MemberLeft>(OnS2C_MemberLeft);
+                .Register<S2C_JoinRoomResult>(OnS2C_JoinRoomResult);
         }
 
         public void UnregisterAll()
         {
             _registrar
                 .Unregister<S2C_CreateRoomResult>()
-                .Unregister<S2C_JoinRoomResult>()
-                .Unregister<S2C_MemberJoined>()
-                .Unregister<S2C_MemberLeft>();
+                .Unregister<S2C_JoinRoomResult>();
         }
 
         private void OnS2C_CreateRoomResult(S2C_CreateRoomResult message)
@@ -133,28 +124,6 @@ namespace StellarNet.Client.GlobalModules.RoomDispatcher
 
             Debug.Log(
                 $"[ClientRoomDispatcherHandle] 加房成功，RoomId={message.RoomId}，组件数量={message.RoomComponentIds?.Length ?? 0}。");
-        }
-
-        private void OnS2C_MemberJoined(S2C_MemberJoined message)
-        {
-            if (message == null)
-            {
-                Debug.LogError("[ClientRoomDispatcherHandle] OnS2C_MemberJoined 失败：message 为 null。");
-                return;
-            }
-
-            OnMemberJoined?.Invoke(message.SessionId);
-        }
-
-        private void OnS2C_MemberLeft(S2C_MemberLeft message)
-        {
-            if (message == null)
-            {
-                Debug.LogError("[ClientRoomDispatcherHandle] OnS2C_MemberLeft 失败：message 为 null。");
-                return;
-            }
-
-            OnMemberLeft?.Invoke(message.SessionId, message.Reason);
         }
     }
 }

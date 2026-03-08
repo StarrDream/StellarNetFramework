@@ -1,5 +1,6 @@
 ﻿using StellarNet.Client.Adapter;
 using StellarNet.Client.Session;
+using StellarNet.Client.State;
 using StellarNet.Shared.Envelope;
 using StellarNet.Shared.Registry;
 using StellarNet.Shared.Serialization;
@@ -9,35 +10,37 @@ namespace StellarNet.Client.Network
 {
     /// <summary>
     /// 客户端统一网络入口，是所有服务端下行消息进入框架的第一个处理节点。
-    /// 职责严格限定为：接收 Adapter 上抛的 NetworkEnvelope、查表反序列化、方向校验、域分流、转发给对应路由器。
-    /// 禁止在此层编写任何业务逻辑、修改业务状态或直接抛领域事件。
-    /// 客户端入站链收到 C2S 协议时必须直接阻断。
+    /// 职责严格限定为：接收 Adapter 上抛的 NetworkEnvelope、查表反序列化、方向校验、状态过滤、域分流、转发给对应路由器。
+    /// 引入 ClientStateProtocolFilter 进行前置拦截，防止非法状态迁移与延迟消息污染。
+    /// 修正：不再持有静态 ClientRoomMessageRouter，而是从 GlobalClientManager 动态获取当前在线房间的 Router。
     /// </summary>
     public sealed class ClientNetworkEntry
     {
         private readonly MessageRegistry _messageRegistry;
         private readonly ISerializer _serializer;
         private readonly ClientGlobalMessageRouter _globalRouter;
-        private readonly ClientRoomMessageRouter _roomRouter;
+        private readonly GlobalClientManager _globalClientManager; // 替换原有的静态 RoomRouter
         private readonly ClientSessionContext _sessionContext;
+        private readonly ClientStateProtocolFilter _protocolFilter;
 
         /// <summary>
         /// 当前网络入口是否处于可用状态。
-        /// 构造器内部若关键依赖为空，对象本身仍可能被外层持有，因此需要显式可用性标记。
         /// </summary>
         public bool IsAvailable =>
             _messageRegistry != null &&
             _serializer != null &&
             _globalRouter != null &&
-            _roomRouter != null &&
-            _sessionContext != null;
+            _globalClientManager != null &&
+            _sessionContext != null &&
+            _protocolFilter != null;
 
         public ClientNetworkEntry(
             MessageRegistry messageRegistry,
             ISerializer serializer,
             ClientGlobalMessageRouter globalRouter,
-            ClientRoomMessageRouter roomRouter,
-            ClientSessionContext sessionContext)
+            GlobalClientManager globalClientManager,
+            ClientSessionContext sessionContext,
+            ClientStateProtocolFilter protocolFilter)
         {
             if (messageRegistry == null)
             {
@@ -57,9 +60,9 @@ namespace StellarNet.Client.Network
                 return;
             }
 
-            if (roomRouter == null)
+            if (globalClientManager == null)
             {
-                Debug.LogError("[ClientNetworkEntry] 构造失败：roomRouter 为 null。");
+                Debug.LogError("[ClientNetworkEntry] 构造失败：globalClientManager 为 null。");
                 return;
             }
 
@@ -69,11 +72,18 @@ namespace StellarNet.Client.Network
                 return;
             }
 
+            if (protocolFilter == null)
+            {
+                Debug.LogError("[ClientNetworkEntry] 构造失败：protocolFilter 为 null。");
+                return;
+            }
+
             _messageRegistry = messageRegistry;
             _serializer = serializer;
             _globalRouter = globalRouter;
-            _roomRouter = roomRouter;
+            _globalClientManager = globalClientManager;
             _sessionContext = sessionContext;
+            _protocolFilter = protocolFilter;
         }
 
         public void BindToAdapter(MirrorClientAdapter adapter)
@@ -131,6 +141,13 @@ namespace StellarNet.Client.Network
                 return;
             }
 
+            // 状态机前置过滤拦截
+            if (!_protocolFilter.CanReceive(metadata))
+            {
+                // 过滤器内部已打印警告或错误日志，此处直接丢弃
+                return;
+            }
+
             object message = _serializer.Deserialize(envelope.Payload, metadata.MessageType);
             if (message == null)
             {
@@ -147,10 +164,20 @@ namespace StellarNet.Client.Network
 
             if (metadata.Domain == MessageDomain.Room)
             {
+                // 房间域消息必须路由到当前在线房间实例
+                var currentRoom = _globalClientManager.CurrentRoom;
+
+                if (currentRoom == null)
+                {
+                    Debug.LogWarning(
+                        $"[ClientNetworkEntry] 收到房间域消息但当前无在线房间实例，MessageId={envelope.MessageId}，Type={metadata.MessageType?.Name}，已丢弃。");
+                    return;
+                }
+
                 if (string.IsNullOrEmpty(_sessionContext.CurrentRoomId))
                 {
                     Debug.LogError(
-                        $"[ClientNetworkEntry] 收到房间域消息但客户端当前不在任何房间中，MessageId={envelope.MessageId}，Envelope.RoomId={envelope.RoomId}，已丢弃。");
+                        $"[ClientNetworkEntry] 收到房间域消息但 SessionContext 中 RoomId 为空，MessageId={envelope.MessageId}，已丢弃。");
                     return;
                 }
 
@@ -161,7 +188,15 @@ namespace StellarNet.Client.Network
                     return;
                 }
 
-                _roomRouter.Dispatch(metadata, message, envelope.RoomId);
+                if (envelope.RoomId != currentRoom.RoomId)
+                {
+                    Debug.LogError(
+                        $"[ClientNetworkEntry] 房间域消息 RoomId 与当前实例不一致，Envelope={envelope.RoomId}，Instance={currentRoom.RoomId}，已丢弃。");
+                    return;
+                }
+
+                // 转发给当前房间实例的 Router
+                currentRoom.MessageRouter.Dispatch(metadata, message, envelope.RoomId);
             }
         }
     }
