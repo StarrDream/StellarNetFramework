@@ -1,21 +1,30 @@
-﻿// Assets/StellarNetFramework/Shared/Serialization/ISerializer.cs
-
-namespace StellarNet.Shared.Serialization
+﻿namespace StellarNet.Shared.Serialization
 {
-    // 框架统一序列化抽象接口。
-    // 框架层只依赖此接口，不内置任何具体序列化实现。
-    // 具体方案（MessagePack / MemoryPack / 自定义二进制）由开发者在装配阶段注入。
-    // 职责边界：只负责协议体对象与 Payload 字节之间的转换。
-    // NetworkEnvelope 头部封装格式属于 Adapter / 传输层职责，不属于此接口职责。
+    /// <summary>
+    /// 序列化抽象接口，定义框架层统一的序列化与反序列化契约。
+    /// 具体实现由各端自行提供（框架默认提供 NewtonsoftJsonSerializer）。
+    /// 禁止在 Shared 层承载任何具体序列化实现，只承载此抽象接口定义。
+    /// </summary>
     public interface ISerializer
     {
-        // 将协议体对象序列化为字节数组
-        // 参数 obj：待序列化的协议体对象，不得为 null
+        /// <summary>
+        /// 将对象序列化为字节数组。
+        /// 序列化失败时实现方应输出详细 Error 日志并返回 null，不得抛出异常掩盖错误。
+        /// </summary>
+        /// <param name="obj">待序列化的对象，不允许为 null。</param>
         byte[] Serialize(object obj);
 
-        // 将字节数组反序列化为指定类型的协议体对象
-        // 参数 data：待反序列化的字节数组，不得为 null 或空
-        // 参数 targetType：目标协议类型，必须继承自四协议基类之一
+        /// <summary>
+        /// 将字节数组反序列化为指定类型的对象实例。
+        /// 反序列化失败时实现方应输出详细 Error 日志并返回 null，不得抛出异常掩盖错误。
+        /// </summary>
+        /// <param name="data">待反序列化的字节数组，不允许为 null 或空数组。</param>
+        /// <param name="targetType">目标类型，来源于 MessageRegistry 查表结果。</param>
         object Deserialize(byte[] data, System.Type targetType);
+
+        /// <summary>
+        /// 泛型反序列化重载，方便调用方直接获取强类型结果。
+        /// </summary>
+        T Deserialize<T>(byte[] data);
     }
 }

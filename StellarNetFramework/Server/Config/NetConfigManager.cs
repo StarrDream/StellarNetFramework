@@ -1,100 +1,191 @@
-﻿// Assets/StellarNetFramework/Server/Config/NetConfigManager.cs
-
+﻿using System.IO;
+using Newtonsoft.Json;
 using UnityEngine;
-using StellarNet.Server.Infrastructure.GlobalScope;
 
 namespace StellarNet.Server.Config
 {
-    // 服务端网络配置管理器，负责 NetConfig.json 的加载、热重载与配置分发。
-    // 配置加载失败时使用默认值继续运行，不阻断服务端启动。
-    // 热重载时通过回调通知各依赖模块更新配置，不要求重启服务端进程。
-    // 配置文件路径由业务层在初始化时指定，框架不硬编码路径。
-    public sealed class NetConfigManager : IGlobalService
+    /// <summary>
+    /// 服务端进程级配置管理器，负责 NetConfig.json 的装载与动态项热重载。
+    /// 严格归属服务端，客户端不得直接读取服务端配置文件。
+    /// 热重载只刷新动态配置项，若检测到静态项变更则输出 Warning 并忽略变更。
+    /// Reload() 必须由宿主层显式调用，框架不内置文件监听自动触发机制。
+    /// 动态配置刷新后只对后续新创建对象生效，不追溯改变已在运行中的房间实例。
+    /// </summary>
+    public sealed class NetConfigManager
     {
-        // 当前生效的配置快照
+        /// <summary>
+        /// 当前生效的配置实例，外部只读。
+        /// </summary>
         public NetConfig Current { get; private set; }
 
-        // 配置变更通知回调，由 GlobalInfrastructure 在装配阶段注册各模块的更新方法
-        private System.Action<NetConfig> _onConfigReloaded;
+        private readonly string _configFilePath;
 
-        public NetConfigManager()
+        // 保存首次加载时的静态配置项快照，用于热重载时的静态项变更检测
+        private string _initialListenAddress;
+        private int _initialListenPort;
+        private int _initialMaxConnections;
+        private string _initialFrameworkVersion;
+        private string _initialProtocolVersion;
+
+        public NetConfigManager(string configFilePath)
         {
-            // 初始化时使用默认配置，确保服务端在配置文件缺失时仍可正常启动
-            Current = new NetConfig();
+            if (string.IsNullOrEmpty(configFilePath))
+            {
+                Debug.LogError("[NetConfigManager] 配置文件路径不能为空，将使用默认配置。");
+                Current = new NetConfig();
+                CacheStaticSnapshot();
+                return;
+            }
+
+            _configFilePath = configFilePath;
+            Current = LoadFromFile(_configFilePath) ?? new NetConfig();
+            CacheStaticSnapshot();
+            ValidateConfig(Current);
         }
 
-        // 从 JSON 字符串加载配置
-        // 参数 json：配置文件内容，由业务层负责文件读取后传入
-        // 加载失败时保留当前配置并输出 Warning
-        public void LoadFromJson(string json)
+        /// <summary>
+        /// 热重载动态配置项。
+        /// 必须由宿主层显式调用，框架不内置文件监听自动触发机制。
+        /// 若检测到静态项变更，输出 Warning 并忽略该项变更，保持原值不变。
+        /// 动态配置刷新后只对后续新创建对象生效，不追溯改变已在运行中的房间实例。
+        /// </summary>
+        public void Reload()
         {
+            if (string.IsNullOrEmpty(_configFilePath))
+            {
+                Debug.LogWarning("[NetConfigManager] 配置文件路径为空，无法执行热重载。");
+                return;
+            }
+
+            var newConfig = LoadFromFile(_configFilePath);
+            if (newConfig == null)
+            {
+                Debug.LogError("[NetConfigManager] 热重载失败：配置文件解析失败，保持当前配置不变。");
+                return;
+            }
+
+            // 检测静态配置项是否发生变更，发现变更则输出 Warning 并还原为初始值
+            bool hasStaticChange = false;
+
+            if (newConfig.ListenAddress != _initialListenAddress)
+            {
+                Debug.LogWarning($"[NetConfigManager] 热重载检测到静态配置项 ListenAddress 变更（{_initialListenAddress} → {newConfig.ListenAddress}），已忽略，修改需重启进程。");
+                newConfig.ListenAddress = _initialListenAddress;
+                hasStaticChange = true;
+            }
+
+            if (newConfig.ListenPort != _initialListenPort)
+            {
+                Debug.LogWarning($"[NetConfigManager] 热重载检测到静态配置项 ListenPort 变更（{_initialListenPort} → {newConfig.ListenPort}），已忽略，修改需重启进程。");
+                newConfig.ListenPort = _initialListenPort;
+                hasStaticChange = true;
+            }
+
+            if (newConfig.MaxConnections != _initialMaxConnections)
+            {
+                Debug.LogWarning($"[NetConfigManager] 热重载检测到静态配置项 MaxConnections 变更（{_initialMaxConnections} → {newConfig.MaxConnections}），已忽略，修改需重启进程。");
+                newConfig.MaxConnections = _initialMaxConnections;
+                hasStaticChange = true;
+            }
+
+            if (newConfig.FrameworkVersion != _initialFrameworkVersion)
+            {
+                Debug.LogWarning($"[NetConfigManager] 热重载检测到静态配置项 FrameworkVersion 变更，已忽略，修改需重启进程。");
+                newConfig.FrameworkVersion = _initialFrameworkVersion;
+                hasStaticChange = true;
+            }
+
+            if (newConfig.ProtocolVersion != _initialProtocolVersion)
+            {
+                Debug.LogWarning($"[NetConfigManager] 热重载检测到静态配置项 ProtocolVersion 变更，已忽略，修改需重启进程。");
+                newConfig.ProtocolVersion = _initialProtocolVersion;
+                hasStaticChange = true;
+            }
+
+            ValidateConfig(newConfig);
+            Current = newConfig;
+
+            if (hasStaticChange)
+            {
+                Debug.Log("[NetConfigManager] 热重载完成（含静态项变更警告），动态配置项已刷新，对后续新创建对象生效。");
+            }
+            else
+            {
+                Debug.Log("[NetConfigManager] 热重载完成，动态配置项已刷新，对后续新创建对象生效。");
+            }
+        }
+
+        /// <summary>
+        /// 从文件路径加载并解析配置，失败返回 null。
+        /// </summary>
+        private NetConfig LoadFromFile(string path)
+        {
+            if (!File.Exists(path))
+            {
+                Debug.LogError($"[NetConfigManager] 配置文件不存在：{path}，将使用默认配置。");
+                return null;
+            }
+
+            string json = File.ReadAllText(path, System.Text.Encoding.UTF8);
+
             if (string.IsNullOrEmpty(json))
             {
-                Debug.LogWarning(
-                    "[NetConfigManager] LoadFromJson 警告：json 内容为空，保留当前配置继续运行。");
-                return;
+                Debug.LogError($"[NetConfigManager] 配置文件内容为空：{path}，将使用默认配置。");
+                return null;
             }
 
-            NetConfig loaded = null;
-            bool parseFailed = false;
-            System.Exception parseException = null;
+            NetConfig config = JsonConvert.DeserializeObject<NetConfig>(json);
 
-            // 此处允许 try-catch：JSON 解析属于不可控的外部数据处理，
-            // 解析失败不应阻断服务端运行，必须降级到默认配置
-            try
-            {
-                loaded = UnityEngine.JsonUtility.FromJson<NetConfig>(json);
-            }
-            catch (System.Exception e)
-            {
-                parseFailed = true;
-                parseException = e;
-            }
-
-            if (parseFailed || loaded == null)
-            {
-                Debug.LogWarning(
-                    $"[NetConfigManager] LoadFromJson 警告：JSON 解析失败，保留当前配置继续运行。" +
-                    $"异常信息：{parseException?.Message}");
-                return;
-            }
-
-            Current = loaded;
-            _onConfigReloaded?.Invoke(Current);
-        }
-
-        // 注册配置变更通知回调
-        public void RegisterReloadCallback(System.Action<NetConfig> callback)
-        {
-            if (callback == null)
-            {
-                Debug.LogError("[NetConfigManager] RegisterReloadCallback 失败：callback 不得为 null");
-                return;
-            }
-
-            _onConfigReloaded += callback;
-        }
-
-        // 注销配置变更通知回调
-        public void UnregisterReloadCallback(System.Action<NetConfig> callback)
-        {
-            if (callback == null)
-                return;
-
-            _onConfigReloaded -= callback;
-        }
-
-        // 强制使用指定配置覆盖当前配置，用于测试与调试场景
-        public void ForceOverride(NetConfig config)
-        {
             if (config == null)
             {
-                Debug.LogError("[NetConfigManager] ForceOverride 失败：config 不得为 null");
-                return;
+                Debug.LogError($"[NetConfigManager] 配置文件反序列化失败：{path}，将使用默认配置。");
+                return null;
             }
 
-            Current = config;
-            _onConfigReloaded?.Invoke(Current);
+            return config;
+        }
+
+        /// <summary>
+        /// 校验配置项合法性，发现非法值输出 Warning 并修正为安全默认值。
+        /// 重点校验幂等清理间隔与 TTL 的关系，防止清理逻辑失效。
+        /// </summary>
+        private void ValidateConfig(NetConfig config)
+        {
+            if (config.IdempotentCleanupIntervalSeconds >= config.IdempotentTtlSeconds)
+            {
+                Debug.LogWarning($"[NetConfigManager] 配置校验警告：IdempotentCleanupIntervalSeconds({config.IdempotentCleanupIntervalSeconds}s) >= IdempotentTtlSeconds({config.IdempotentTtlSeconds}s)，" +
+                                 "后台巡检间隔不应大于等于 TTL，可能导致过期缓存无法及时清理。");
+            }
+
+            if (config.ReplayBufferCapacity <= 0)
+            {
+                Debug.LogWarning($"[NetConfigManager] ReplayBufferCapacity 配置值非法（{config.ReplayBufferCapacity}），已修正为默认值 1024。");
+                config.ReplayBufferCapacity = 1024;
+            }
+
+            if (config.MaxConnections <= 0)
+            {
+                Debug.LogWarning($"[NetConfigManager] MaxConnections 配置值非法（{config.MaxConnections}），已修正为默认值 200。");
+                config.MaxConnections = 200;
+            }
+
+            if (config.ListenPort <= 0 || config.ListenPort > 65535)
+            {
+                Debug.LogWarning($"[NetConfigManager] ListenPort 配置值非法（{config.ListenPort}），已修正为默认值 7777。");
+                config.ListenPort = 7777;
+            }
+        }
+
+        /// <summary>
+        /// 缓存首次加载时的静态配置项快照，用于热重载时的静态项变更检测。
+        /// </summary>
+        private void CacheStaticSnapshot()
+        {
+            _initialListenAddress = Current.ListenAddress;
+            _initialListenPort = Current.ListenPort;
+            _initialMaxConnections = Current.MaxConnections;
+            _initialFrameworkVersion = Current.FrameworkVersion;
+            _initialProtocolVersion = Current.ProtocolVersion;
         }
     }
 }

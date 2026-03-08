@@ -1,44 +1,43 @@
-﻿// Assets/StellarNetFramework/Shared/Identity/ConnectionId.cs
-
-using System;
+﻿using System;
 
 namespace StellarNet.Shared.Identity
 {
-    // ConnectionId 是框架统一的连接标识值类型。
-    // 底层网络库（Mirror）的原生连接句柄只允许在 Adapter 层完成映射，
-    // 上层业务、路由、发送链与会话系统全部依赖此类型，不得直接持有 Mirror 原生 int 句柄。
-    // 采用 readonly struct 避免装箱，保持高频传递时的零 GC 压力。
-    [Serializable]
+    /// <summary>
+    /// 底层连接标识值类型，表示当前底层网络连接的唯一句柄映射。
+    /// 底层网络库原生连接句柄必须在 Adapter 层映射为此统一值类型，上层业务不得直接依赖底层原生类型。
+    /// ConnectionId 属于服务端接收链的运行时上下文，不属于 NetworkEnvelope 字段。
+    /// 客户端业务逻辑不得持有或上传有效 ConnectionId 作为身份依据。
+    /// 断线后 ConnectionId 可以失效，SessionId 可以保留用于重连恢复。
+    /// </summary>
     public readonly struct ConnectionId : IEquatable<ConnectionId>
     {
-        // 底层原始值，仅由 Adapter 层在映射时赋值
-        public readonly int RawValue;
+        /// <summary>
+        /// 底层连接的整型标识值，来源于 Mirror 的 NetworkConnection.connectionId。
+        /// </summary>
+        public readonly int Value;
 
-        // 框架保留的无效占位值，用于表示"当前不存在有效连接"
+        /// <summary>
+        /// 表示无效或未绑定连接的默认值。
+        /// </summary>
         public static readonly ConnectionId Invalid = new ConnectionId(-1);
 
-        public ConnectionId(int rawValue)
+        public ConnectionId(int value)
         {
-            RawValue = rawValue;
+            Value = value;
         }
 
-        // 判断当前 ConnectionId 是否为有效值
-        public bool IsValid => RawValue >= 0;
+        public bool IsValid => Value >= 0;
 
-        public bool Equals(ConnectionId other) => RawValue == other.RawValue;
+        public bool Equals(ConnectionId other) => Value == other.Value;
 
-        public override bool Equals(object obj)
-        {
-            if (obj is ConnectionId other)
-                return Equals(other);
-            return false;
-        }
+        public override bool Equals(object obj) => obj is ConnectionId other && Equals(other);
 
-        public override int GetHashCode() => RawValue.GetHashCode();
+        public override int GetHashCode() => Value.GetHashCode();
 
-        public override string ToString() => $"ConnectionId({RawValue})";
+        public override string ToString() => $"ConnId({Value})";
 
         public static bool operator ==(ConnectionId left, ConnectionId right) => left.Equals(right);
+
         public static bool operator !=(ConnectionId left, ConnectionId right) => !left.Equals(right);
     }
 }
