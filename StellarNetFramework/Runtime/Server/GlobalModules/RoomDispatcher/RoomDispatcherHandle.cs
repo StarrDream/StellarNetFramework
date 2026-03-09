@@ -1,7 +1,16 @@
-﻿using StellarNet.Server.Idempotent;
+﻿// ════════════════════════════════════════════════════════════════
+// 文件：RoomDispatcherHandle.cs
+// 路径：Assets/StellarNetFramework/Runtime/Server/GlobalModules/RoomDispatcher/RoomDispatcherHandle.cs
+// 职责：房间调度模块 Handle。
+//       修正：OnC2S_CreateRoom 中，创建房间后获取实际装配的组件列表，
+//       并填入 S2C_CreateRoomResult 下发给客户端，实现服务端权威同步。
+// ════════════════════════════════════════════════════════════════
+
+using StellarNet.Server.Idempotent;
 using StellarNet.Server.Network;
 using StellarNet.Server.Room;
 using StellarNet.Server.Room.BuiltIn;
+using StellarNet.Server.Room.Settings;
 using StellarNet.Server.Sender;
 using StellarNet.Server.Session;
 using StellarNet.Shared.Identity;
@@ -13,8 +22,6 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
 {
     /// <summary>
     /// 房间调度模块 Handle，处理建房、加房、离房、获取房间列表等调度请求。
-    /// 全局模块不直接穿透房间内部组件，而是通过 GlobalRoomManager 代理访问房间骨架组件。
-    /// 房间基础设置组件是出厂强制挂载组件，默认组件清单必须包含它。
     /// </summary>
     public class RoomDispatcherHandle : IGlobalService
     {
@@ -123,6 +130,7 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
                 return;
             }
 
+            // 1. 幂等性检查
             if (_idempotentCache.TryGetResult(message.IdempotentToken, out var cachedResult))
             {
                 var cachedResponse = cachedResult as S2C_CreateRoomResult;
@@ -143,6 +151,7 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
                 return;
             }
 
+            // 2. 状态检查
             if (session.IsInRoom)
             {
                 Debug.LogError(
@@ -159,8 +168,10 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
                 return;
             }
 
+            // 3. 执行建房
             var roomId = StellarNet.Shared.Identity.RoomId.Generate(message.RoomName ?? "Room");
             var settings = BuildRoomSettings(message, roomId.Value);
+
             if (settings == null)
             {
                 _model.ClearCreating(session.SessionId);
@@ -172,8 +183,11 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
                 return;
             }
 
+            // 获取默认组件清单（包含 RoomBaseSettings）
+            // 即使客户端没有请求任何组件，这里也会强制加入基础组件
             string[] componentIds = GetDefaultRoomComponentIds();
             var room = _roomManager.CreateRoom(roomId.Value, settings, componentIds);
+
             if (room == null)
             {
                 _model.ClearCreating(session.SessionId);
@@ -185,6 +199,7 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
                 return;
             }
 
+            // 4. 成员加入与绑定
             room.AddMember(session.SessionId, connectionId);
             session.BindRoom(roomId.Value);
 
@@ -203,17 +218,23 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
 
             _model.ClearCreating(session.SessionId);
 
+            // 5. [关键] 获取最终装配的组件清单，下发给客户端
+            // 客户端必须依赖此清单进行本地装配，而不是揣测默认组件
+            string[] actualComponentIds = room.GetComponentIds();
+
             var successResult = new S2C_CreateRoomResult
             {
                 Success = true,
                 RoomId = roomId.Value,
+                RoomComponentIds = actualComponentIds ?? new string[0], // 填充字段
                 FailReason = string.Empty
             };
 
             _idempotentCache.SetResult(message.IdempotentToken, successResult);
             _globalSender.SendToSession(session.SessionId, successResult);
 
-            Debug.Log($"[RoomDispatcherHandle] 建房成功，RoomId={roomId.Value}，SessionId={session.SessionId}。");
+            Debug.Log(
+                $"[RoomDispatcherHandle] 建房成功，RoomId={roomId.Value}，SessionId={session.SessionId}，组件数={actualComponentIds?.Length}。");
         }
 
         private void OnC2S_JoinRoom(ConnectionId connectionId, C2S_JoinRoom message)
@@ -282,6 +303,7 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
 
             _model.ClearJoining(session.SessionId);
 
+            // 加入成功，下发组件清单
             string[] componentIds = room.GetComponentIds();
             var joinResult = new S2C_JoinRoomResult
             {
@@ -290,7 +312,6 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
                 RoomComponentIds = componentIds ?? new string[0],
                 FailReason = string.Empty
             };
-
             _globalSender.SendToSession(session.SessionId, joinResult);
 
             Debug.Log($"[RoomDispatcherHandle] 加房成功，RoomId={message.RoomId}，SessionId={session.SessionId}。");
@@ -308,6 +329,7 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
             if (!session.IsInRoom)
             {
                 Debug.LogWarning($"[RoomDispatcherHandle] 离房请求：SessionId={session.SessionId} 当前不在任何房间中，已忽略。");
+                _globalSender.SendToSession(session.SessionId, new S2C_LeaveRoomResult { Success = true });
                 return;
             }
 
@@ -318,9 +340,11 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
                 session.UnbindRoom();
                 Debug.LogWarning(
                     $"[RoomDispatcherHandle] 离房时目标房间已不存在，SessionId={session.SessionId}，RoomId={roomId}，已清空房间绑定。");
+                _globalSender.SendToSession(session.SessionId, new S2C_LeaveRoomResult { Success = true });
                 return;
             }
 
+            // 1. 广播成员离开消息给房间内其他人
             var memberLeft = new S2C_MemberLeft
             {
                 SessionId = session.SessionId,
@@ -328,9 +352,11 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
             };
             _roomSender.BroadcastToRoom(roomId, memberLeft);
 
+            // 2. 执行逻辑移除
             room.RemoveMember(session.SessionId);
             session.UnbindRoom();
 
+            // 3. 通知房间骨架组件（处理房主转让等）
             bool notifyLeftSuccess = _roomManager.TryNotifyRoomMemberLeft(roomId, session.SessionId, "主动离开");
             if (!notifyLeftSuccess)
             {
@@ -338,6 +364,10 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
                     $"[RoomDispatcherHandle] 离房后房间骨架成员离开通知失败，RoomId={roomId}，SessionId={session.SessionId}。");
             }
 
+            // 4. 发送离房成功结果给请求者，闭环客户端状态机
+            _globalSender.SendToSession(session.SessionId, new S2C_LeaveRoomResult { Success = true });
+
+            // 5. 检查销毁
             if (room.MemberCount == 0)
             {
                 _roomManager.DestroyRoom(roomId, "所有成员已离开");
@@ -412,9 +442,12 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
         protected virtual StellarNet.Shared.RoomSettings.IRoomSettings BuildRoomSettings(
             C2S_CreateRoom message, string roomId)
         {
-            Debug.LogWarning(
-                $"[RoomDispatcherHandle] BuildRoomSettings 未重写，返回 null，RoomId={roomId}。开发者必须重写此方法提供具体 IRoomSettings 实现。");
-            return null;
+            return new GeneralRoomSettings
+            {
+                RoomName = message.RoomName,
+                MaxMemberCount = message.MaxMemberCount > 0 ? message.MaxMemberCount : 10,
+                Password = message.Password
+            };
         }
 
         /// <summary>
@@ -425,7 +458,6 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
         {
             return new[]
             {
-                // 由于 Component 已被删除，这里改为引用 Handle 的 StableComponentId
                 ServerRoomBaseSettingsHandle.StableComponentId
             };
         }

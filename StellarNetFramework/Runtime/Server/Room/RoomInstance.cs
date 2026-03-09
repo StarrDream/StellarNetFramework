@@ -464,7 +464,7 @@ namespace StellarNet.Server.Room
             // 清理房间作用域服务定位器
             RoomServiceLocator.Clear();
             // 录制器收尾（若已挂载）
-            ReplayRecorder?.Finalize();
+            ReplayRecorder?.OnFinalize();
 
             // 清理成员集合
             _memberSessionIds.Clear();

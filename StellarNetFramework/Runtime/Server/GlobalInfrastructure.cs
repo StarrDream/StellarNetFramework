@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using StellarNet.Server.Adapter;
 using StellarNet.Server.Config;
@@ -11,6 +12,7 @@ using StellarNet.Server.GlobalModules.User;
 using StellarNet.Server.Idempotent;
 using StellarNet.Server.Network;
 using StellarNet.Server.Room;
+using StellarNet.Server.Room.BuiltIn; // [新增] 引入内置组件命名空间
 using StellarNet.Server.Sender;
 using StellarNet.Server.ServiceLocator;
 using StellarNet.Server.Session;
@@ -22,20 +24,16 @@ namespace StellarNet.Server
 {
     /// <summary>
     /// 服务端全局装配入口，是整个服务端框架的唯一启动点与生命周期宿主。
-    /// 负责按正确依赖顺序创建所有服务端基础设施对象、完成依赖注入、绑定事件与启动监听。
-    /// 持有所有顶层对象的强引用，防止 GC 提前回收。
-    /// Tick 驱动由 Unity MonoBehaviour Update 调用，不使用独立线程。
-    /// Shutdown 流程由 OnApplicationQuit 触发，确保所有房间与录制器正常收尾。
-    /// 此类不承担任何业务逻辑，只负责装配与生命周期管理。
     /// </summary>
     public sealed class GlobalInfrastructure : MonoBehaviour
     {
-        [Header("配置文件路径")] [SerializeField] private string _netConfigFilePath = "Config/NetConfig.json";
+        [Header("配置加载路径 (支持 @StreamingAssets 等标记)")]
+        public string ConfigLoadPath;
 
         [Header("Mirror 适配器引用")] [SerializeField]
         private MirrorServerAdapter _mirrorAdapter;
 
-        // 顶层对象强引用（防止 GC 提前回收）
+        // 顶层对象强引用
         private NetConfigManager _configManager;
         private NewtonsoftJsonSerializer _serializer;
         private MessageRegistry _messageRegistry;
@@ -83,11 +81,7 @@ namespace StellarNet.Server
 
         private void Update()
         {
-            if (!_isInitialized)
-            {
-                return;
-            }
-
+            if (!_isInitialized) return;
             float deltaTime = Time.deltaTime;
             _sessionManager?.Tick();
             _idempotentCache?.Tick();
@@ -99,17 +93,17 @@ namespace StellarNet.Server
             Shutdown();
         }
 
-        /// <summary>
-        /// 按正确依赖顺序完成所有服务端基础设施对象的创建、注入与绑定。
-        /// 任一关键依赖创建失败时输出 Error 并阻止后续装配，防止产生半初始化状态。
-        /// </summary>
         private void Initialize()
         {
-            _configManager = new NetConfigManager(_netConfigFilePath);
+            // 解析路径标记并拼接文件名
+            string folderPath = ResolveConfigPath(ConfigLoadPath);
+            string fullJsonPath = Path.Combine(folderPath, "NetConfig.json");
+
+            _configManager = new NetConfigManager(fullJsonPath);
             var config = _configManager.Current;
             if (config == null)
             {
-                Debug.LogError($"[GlobalInfrastructure] Initialize 失败：物体 {name} 的 NetConfig 为空。");
+                Debug.LogError($"[GlobalInfrastructure] Initialize 失败：无法从路径加载配置: {fullJsonPath}");
                 return;
             }
 
@@ -133,7 +127,10 @@ namespace StellarNet.Server
             _globalRouter = new ServerGlobalMessageRouter();
             _globalRegistrar = new GlobalMessageRegistrar(_globalRouter);
             _ownershipValidator = new RoomOwnershipValidator(_sessionManager);
+
+            // 1. 创建注册表
             _componentRegistry = new RoomComponentRegistry();
+
             _roomAssembler = new ServerRoomAssembler();
             _idempotentCache = new IdempotentCache(
                 config.IdempotentTtlSeconds,
@@ -146,6 +143,8 @@ namespace StellarNet.Server
                 config.RoomEmptyTimeoutSeconds);
 
             _sendCoordinator = new ServerSendCoordinator(_mirrorAdapter, _roomManager);
+
+            // 2. 创建发送器
             _globalSender = new ServerGlobalMessageSender(
                 _sendCoordinator,
                 _messageRegistry,
@@ -172,6 +171,10 @@ namespace StellarNet.Server
                 return;
             }
 
+            // [关键修复] 3. 注册内置房间组件工厂
+            // 必须在 _globalSender, _roomSender, _sessionManager 创建之后调用
+            RegisterBuiltInRoomComponents();
+
             _ownershipValidator.BindRoomDispatchDelegate(_roomManager.RouteRoomMessage);
 
             _mirrorAdapter.Initialize(_serializer);
@@ -180,6 +183,7 @@ namespace StellarNet.Server
             _mirrorAdapter.OnClientDisconnected += OnClientDisconnected;
 
             AssembleGlobalModules();
+
             if (!ValidateGlobalModules())
             {
                 Debug.LogError($"[GlobalInfrastructure] Initialize 失败：物体 {name} 的全局模块装配不完整。");
@@ -190,14 +194,51 @@ namespace StellarNet.Server
 
             _mirrorAdapter.StartListening();
             _isInitialized = true;
-
-            Debug.Log($"[GlobalInfrastructure] 服务端装配完成，开始监听，物体={name}。");
+            Debug.Log($"[GlobalInfrastructure] 服务端装配完成，开始监听，配置源: {fullJsonPath}");
         }
 
         /// <summary>
-        /// 构建本端协议注册表。
-        /// 当前默认扫描 Shared 协议程序集。
+        /// 注册内置房间组件
         /// </summary>
+        private void RegisterBuiltInRoomComponents()
+        {
+            // 注册 RoomBaseSettings 组件工厂
+            // 使用 Lambda 表达式注入依赖，实现控制反转
+            _componentRegistry.Register(
+                ServerRoomBaseSettingsHandle.StableComponentId,
+                roomInstance => new ServerRoomBaseSettingsHandle(
+                    _globalSender,
+                    _roomSender,
+                    _sessionManager,
+                    _roomManager
+                )
+            );
+
+            Debug.Log("[GlobalInfrastructure] 内置房间组件注册完成。");
+        }
+
+        private string ResolveConfigPath(string rawPath)
+        {
+            if (string.IsNullOrEmpty(rawPath))
+                return Path.Combine(Application.streamingAssetsPath, "ServerNetConfig");
+
+            string path = rawPath.Replace("\\", "/");
+            if (path.StartsWith("@StreamingAssets"))
+            {
+                return path.Replace("@StreamingAssets", Application.streamingAssetsPath);
+            }
+            else if (path.StartsWith("@PersistentData"))
+            {
+                return path.Replace("@PersistentData", Application.persistentDataPath);
+            }
+            else if (path.StartsWith("@DataPath"))
+            {
+                return path.Replace("@DataPath", Application.dataPath);
+            }
+
+            return path;
+        }
+
         private MessageRegistry BuildMessageRegistry()
         {
             var assemblies = new List<Assembly>();
@@ -212,76 +253,20 @@ namespace StellarNet.Server
             return MessageRegistry.Build(assemblies);
         }
 
-        /// <summary>
-        /// 校验核心基础设施装配结果，发现任意关键对象为空时立即阻断启动。
-        /// </summary>
         private bool ValidateCoreInfrastructure()
         {
-            if (_sessionManager == null)
-            {
-                Debug.LogError(
-                    $"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：_sessionManager 为 null，物体={name}。");
-                return false;
-            }
-
-            if (_globalEventBus == null)
-            {
-                Debug.LogError(
-                    $"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：_globalEventBus 为 null，物体={name}。");
-                return false;
-            }
-
-            if (_globalServiceLocator == null)
-            {
-                Debug.LogError(
-                    $"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：_globalServiceLocator 为 null，物体={name}。");
-                return false;
-            }
-
-            if (_globalRouter == null || _globalRegistrar == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：全局路由器或注册器为空，物体={name}。");
-                return false;
-            }
-
-            if (_ownershipValidator == null)
-            {
-                Debug.LogError(
-                    $"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：_ownershipValidator 为 null，物体={name}。");
-                return false;
-            }
-
-            if (_componentRegistry == null || _roomAssembler == null || _roomManager == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：房间基础设施缺失，物体={name}。");
-                return false;
-            }
-
-            if (_idempotentCache == null)
-            {
-                Debug.LogError(
-                    $"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：_idempotentCache 为 null，物体={name}。");
-                return false;
-            }
-
-            if (_sendCoordinator == null || _globalSender == null || _roomSender == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：发送链装配缺失，物体={name}。");
-                return false;
-            }
-
-            if (_networkEntry == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateCoreInfrastructure 失败：_networkEntry 为 null，物体={name}。");
-                return false;
-            }
-
+            if (_sessionManager == null) return false;
+            if (_globalEventBus == null) return false;
+            if (_globalServiceLocator == null) return false;
+            if (_globalRouter == null || _globalRegistrar == null) return false;
+            if (_ownershipValidator == null) return false;
+            if (_componentRegistry == null || _roomAssembler == null || _roomManager == null) return false;
+            if (_idempotentCache == null) return false;
+            if (_sendCoordinator == null || _globalSender == null || _roomSender == null) return false;
+            if (_networkEntry == null) return false;
             return true;
         }
 
-        /// <summary>
-        /// 装配所有出厂全局模块，将 Model 与 Handle 创建并注册到 GlobalScopeServiceLocator。
-        /// </summary>
         private void AssembleGlobalModules()
         {
             _userModel = new UserModel();
@@ -290,22 +275,13 @@ namespace StellarNet.Server
 
             _reconnectModel = new StellarNet.Server.GlobalModules.Reconnect.ReconnectModel();
             _reconnectHandle = new StellarNet.Server.GlobalModules.Reconnect.ReconnectHandle(
-                _sessionManager,
-                _roomManager,
-                _reconnectModel,
-                _globalSender,
-                _globalRegistrar);
+                _sessionManager, _roomManager, _reconnectModel, _globalSender, _globalRegistrar);
             _globalServiceLocator.Register<StellarNet.Server.GlobalModules.Reconnect.ReconnectHandle>(_reconnectHandle);
 
             _roomDispatcherModel = new RoomDispatcherModel();
             _roomDispatcherHandle = new RoomDispatcherHandle(
-                _sessionManager,
-                _roomManager,
-                _roomDispatcherModel,
-                _idempotentCache,
-                _globalSender,
-                _roomSender,
-                _globalRegistrar);
+                _sessionManager, _roomManager, _roomDispatcherModel, _idempotentCache,
+                _globalSender, _roomSender, _globalRegistrar);
             _globalServiceLocator.Register<RoomDispatcherHandle>(_roomDispatcherHandle);
 
             _replayModel = new ReplayModel();
@@ -314,69 +290,26 @@ namespace StellarNet.Server
 
             _announcementModel = new AnnouncementModel();
             _announcementHandle = new AnnouncementHandle(
-                _sessionManager,
-                _announcementModel,
-                _globalSender,
-                _globalRegistrar);
+                _sessionManager, _announcementModel, _globalSender, _globalRegistrar);
             _globalServiceLocator.Register<AnnouncementHandle>(_announcementHandle);
 
             _lobbyChatModel = new LobbyChatModel();
             _lobbyChatHandle = new LobbyChatHandle(
-                _sessionManager,
-                _lobbyChatModel,
-                _globalSender,
-                _globalRegistrar);
+                _sessionManager, _lobbyChatModel, _globalSender, _globalRegistrar);
             _globalServiceLocator.Register<LobbyChatHandle>(_lobbyChatHandle);
         }
 
-        /// <summary>
-        /// 校验全局模块装配结果，避免构造器内部只打印错误但外层仍继续运行。
-        /// </summary>
         private bool ValidateGlobalModules()
         {
-            if (_userModel == null || _userHandle == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateGlobalModules 失败：User 模块装配缺失，物体={name}。");
-                return false;
-            }
-
-            if (_reconnectModel == null || _reconnectHandle == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateGlobalModules 失败：Reconnect 模块装配缺失，物体={name}。");
-                return false;
-            }
-
-            if (_roomDispatcherModel == null || _roomDispatcherHandle == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateGlobalModules 失败：RoomDispatcher 模块装配缺失，物体={name}。");
-                return false;
-            }
-
-            if (_replayModel == null || _replayHandle == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateGlobalModules 失败：Replay 模块装配缺失，物体={name}。");
-                return false;
-            }
-
-            if (_announcementModel == null || _announcementHandle == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateGlobalModules 失败：Announcement 模块装配缺失，物体={name}。");
-                return false;
-            }
-
-            if (_lobbyChatModel == null || _lobbyChatHandle == null)
-            {
-                Debug.LogError($"[GlobalInfrastructure] ValidateGlobalModules 失败：LobbyChat 模块装配缺失，物体={name}。");
-                return false;
-            }
-
+            if (_userModel == null || _userHandle == null) return false;
+            if (_reconnectModel == null || _reconnectHandle == null) return false;
+            if (_roomDispatcherModel == null || _roomDispatcherHandle == null) return false;
+            if (_replayModel == null || _replayHandle == null) return false;
+            if (_announcementModel == null || _announcementHandle == null) return false;
+            if (_lobbyChatModel == null || _lobbyChatHandle == null) return false;
             return true;
         }
 
-        /// <summary>
-        /// 调用所有 Handle 的 RegisterAll()，完成协议处理委托注册。
-        /// 必须在所有 Handle 构造完成后统一调用，不允许在构造函数中自行注册。
-        /// </summary>
         private void RegisterAllHandles()
         {
             _userHandle.RegisterAll();
@@ -398,18 +331,11 @@ namespace StellarNet.Server
             _sessionManager.OnConnectionDisconnected(connectionId);
         }
 
-        /// <summary>
-        /// 关停所有服务端基础设施，确保所有房间与录制器正常收尾。
-        /// 执行顺序：注销 Handle → 停止监听 → 销毁所有房间 → 清理事件总线与服务定位器。
-        /// </summary>
         private void Shutdown()
         {
-            if (!_isInitialized)
-            {
-                return;
-            }
-
+            if (!_isInitialized) return;
             _isInitialized = false;
+
             Debug.Log($"[GlobalInfrastructure] 开始关停服务端，物体={name}。");
 
             _userHandle?.UnregisterAll();

@@ -1,7 +1,16 @@
-﻿using System;
+﻿// ════════════════════════════════════════════════════════════════
+// 文件：MirrorServerAdapter.cs
+// 路径：Assets/StellarNetFramework/Runtime/Server/Adapter/MirrorServerAdapter.cs
+// 职责：Mirror 服务端网络适配器。
+//       修正：移除私有 FrameworkRawMessage 定义，使用 Shared.Network.FrameworkRawMessage，
+//       解决类型哈希不匹配导致的 "failed to unpack" 错误。
+// ════════════════════════════════════════════════════════════════
+
+using System;
 using Mirror;
 using StellarNet.Shared.Envelope;
 using StellarNet.Shared.Identity;
+using StellarNet.Shared.Network; // 引入 Shared 命名空间
 using StellarNet.Shared.Serialization;
 using UnityEngine;
 
@@ -36,10 +45,6 @@ namespace StellarNet.Server.Adapter
 
         private ISerializer _serializer;
 
-        // 框架自定义消息 ID，用于在 Mirror 消息系统中注册字节透传通道
-        // 使用 ushort 类型以符合 Mirror 消息 ID 规范
-        private const ushort FrameworkMessageId = 9999;
-
         /// <summary>
         /// 由 GlobalInfrastructure 在装配阶段调用，注入序列化器依赖。
         /// 不在 Awake/Start 中自行初始化，遵循统一装配原则。
@@ -62,13 +67,15 @@ namespace StellarNet.Server.Adapter
         {
             if (_serializer == null)
             {
-                Debug.LogError($"[MirrorServerAdapter] StartListening 失败：物体 {name} 的 _serializer 为 null，请先调用 Initialize()。");
+                Debug.LogError(
+                    $"[MirrorServerAdapter] StartListening 失败：物体 {name} 的 _serializer 为 null，请先调用 Initialize()。");
                 return;
             }
 
             // 注册框架自定义字节透传消息处理器
-            // 使用 Mirror 的 NetworkServer.RegisterHandler 注册原始字节消息
+            // 使用 Shared 层定义的 FrameworkRawMessage
             NetworkServer.RegisterHandler<FrameworkRawMessage>(OnMirrorMessageReceived);
+
             StartServer();
             Debug.Log($"[MirrorServerAdapter] 服务端开始监听，物体：{name}。");
         }
@@ -92,7 +99,8 @@ namespace StellarNet.Server.Adapter
         {
             if (!connectionId.IsValid)
             {
-                Debug.LogError($"[MirrorServerAdapter] Send 失败：ConnectionId 无效，当前值：{connectionId}，MessageId：{envelope?.MessageId}。");
+                Debug.LogError(
+                    $"[MirrorServerAdapter] Send 失败：ConnectionId 无效，当前值：{connectionId}，MessageId：{envelope?.MessageId}。");
                 return;
             }
 
@@ -104,17 +112,20 @@ namespace StellarNet.Server.Adapter
 
             if (!NetworkServer.connections.TryGetValue(connectionId.Value, out var conn))
             {
-                Debug.LogError($"[MirrorServerAdapter] Send 失败：在 Mirror 连接表中找不到 ConnectionId={connectionId}，MessageId：{envelope.MessageId}。");
+                Debug.LogError(
+                    $"[MirrorServerAdapter] Send 失败：在 Mirror 连接表中找不到 ConnectionId={connectionId}，MessageId：{envelope.MessageId}。");
                 return;
             }
 
             byte[] envelopeBytes = _serializer.Serialize(envelope);
             if (envelopeBytes == null)
             {
-                Debug.LogError($"[MirrorServerAdapter] Send 失败：NetworkEnvelope 序列化结果为 null，ConnectionId：{connectionId}，MessageId：{envelope.MessageId}。");
+                Debug.LogError(
+                    $"[MirrorServerAdapter] Send 失败：NetworkEnvelope 序列化结果为 null，ConnectionId：{connectionId}，MessageId：{envelope.MessageId}。");
                 return;
             }
 
+            // 使用 Shared 层定义的 FrameworkRawMessage
             var rawMsg = new FrameworkRawMessage { Data = envelopeBytes };
             conn.Send(rawMsg);
         }
@@ -134,6 +145,7 @@ namespace StellarNet.Server.Adapter
             var connectionId = new ConnectionId(conn.connectionId);
             Debug.Log($"[MirrorServerAdapter] 客户端连接断开，ConnectionId={connectionId}。");
             OnClientDisconnected?.Invoke(connectionId);
+
             // 调用基类确保 Mirror 内部连接清理正常执行
             base.OnServerDisconnect(conn);
         }
@@ -152,7 +164,8 @@ namespace StellarNet.Server.Adapter
 
             if (_serializer == null)
             {
-                Debug.LogError($"[MirrorServerAdapter] _serializer 为 null，无法解封装数据包，ConnectionId={conn.connectionId}，已丢弃。");
+                Debug.LogError(
+                    $"[MirrorServerAdapter] _serializer 为 null，无法解封装数据包，ConnectionId={conn.connectionId}，已丢弃。");
                 return;
             }
 
@@ -165,15 +178,6 @@ namespace StellarNet.Server.Adapter
 
             var connectionId = new ConnectionId(conn.connectionId);
             OnDataReceived?.Invoke(connectionId, envelope);
-        }
-
-        /// <summary>
-        /// Mirror 自定义消息结构，用于在 Mirror 消息系统中透传框架字节数据。
-        /// 此结构只存在于 Adapter 层，上层不感知 Mirror 消息类型。
-        /// </summary>
-        private struct FrameworkRawMessage : NetworkMessage
-        {
-            public byte[] Data;
         }
     }
 }

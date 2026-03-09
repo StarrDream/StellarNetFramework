@@ -70,7 +70,7 @@ namespace StellarNet.Server.Room
 
             if (!_factories.TryGetValue(componentId, out var factory))
             {
-                Debug.LogError($"[RoomComponentRegistry] CreateComponent 失败：componentId={componentId} 未在注册表中找到对应工厂，" +
+                    Debug.LogError($"[RoomComponentRegistry] CreateComponent 失败：componentId={componentId} 未在注册表中找到对应工厂，" +
                                $"RoomId={roomInstance.RoomId}，请检查是否遗漏注册或使用了非稳定标识。");
                 return null;
             }

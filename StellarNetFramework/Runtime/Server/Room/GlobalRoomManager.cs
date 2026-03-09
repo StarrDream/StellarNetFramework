@@ -189,6 +189,67 @@ namespace StellarNet.Server.Room
         }
 
         /// <summary>
+        /// 将成员从房间中移除。
+        /// <para>职责：</para>
+        /// <para>1. 查找成员当前所在的房间。</para>
+        /// <para>2. 通知房间内部业务组件（如 BaseSettings）执行离房逻辑（广播、换房主）。</para>
+        /// <para>3. 解除 Session 与 Room 的绑定关系，使其恢复自由身。</para>
+        /// <para>4. 检查房间是否变空，触发销毁倒计时。</para>
+        /// </summary>
+        /// <param name="sessionId">要移除的成员 SessionId</param>
+        /// <param name="reason">离开原因（默认"主动离开"）</param>
+        public void RemoveMember(string sessionId, string reason = "主动离开")
+        {
+            if (string.IsNullOrEmpty(sessionId))
+            {
+                Debug.LogError("[GlobalRoomManager] RemoveMember 失败：sessionId 为空。");
+                return;
+            }
+
+            // 1. 获取 Session 对象
+            var session = _sessionManager.GetSessionById(sessionId);
+            if (session == null)
+            {
+                Debug.LogWarning($"[GlobalRoomManager] RemoveMember 警告：SessionId={sessionId} 不在线或不存在。");
+                return;
+            }
+
+            // 2. 检查该 Session 当前是否在房间中
+            string currentRoomId = session.CurrentRoomId;
+            if (string.IsNullOrEmpty(currentRoomId))
+            {
+                Debug.LogWarning($"[GlobalRoomManager] RemoveMember 警告：SessionId={sessionId} 当前不在任何房间中。");
+                return;
+            }
+
+            // 3. 获取房间实例
+            if (!_routableRooms.TryGetValue(currentRoomId, out var room))
+            {
+                // 异常情况：Session 记录了 RoomId，但 GlobalManager 里找不到这个房间
+                // 强制修正 Session 状态
+                Debug.LogError($"[GlobalRoomManager] RemoveMember 异常：房间 {currentRoomId} 不存在，强制重置 Session 状态。");
+                session.UnbindRoom();
+                return;
+            }
+
+            // 4. 通知房间内部业务组件 (触发广播、房主转移等)
+            // 注意：这里调用的是 TryNotifyRoomMemberLeft，它会通过 ServiceLocator 找到 BaseSettings 组件
+            bool notifySuccess = TryNotifyRoomMemberLeft(currentRoomId, sessionId, reason);
+            if (!notifySuccess)
+            {
+                Debug.LogWarning($"[GlobalRoomManager] RemoveMember 警告：未能通知房间 {currentRoomId} 业务组件成员离开。");
+            }
+
+            // 5. [关键] 解除绑定 (更新全局索引)
+            // 这步执行完后，session.CurrentRoomId 变为空，允许再次建房
+            session.UnbindRoom();
+
+            Debug.Log($"[GlobalRoomManager] 成员移除成功：SessionId={sessionId}, RoomId={currentRoomId}, Reason={reason}");
+
+            // 6. 检查房间是否空置 (由 Tick 中的 CheckEmptyTimeout 处理，这里无需立即销毁)
+        }
+
+        /// <summary>
         /// 通知目标房间的基础设置组件有成员加入。
         /// 这是全局模块访问房间骨架组件的统一跨域代理入口。
         /// </summary>

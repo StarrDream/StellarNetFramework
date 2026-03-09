@@ -1,4 +1,12 @@
-﻿using StellarNet.Shared.Protocol;
+﻿// ════════════════════════════════════════════════════════════════
+// 文件：RoomDispatchBuiltInMessages.cs
+// 路径：Assets/StellarNetFramework/Runtime/Shared/Protocol/BuiltIn/Room/RoomDispatchBuiltInMessages.cs
+// 职责：房间调度模块内置协议定义。
+//       修正：S2C_CreateRoomResult 增加 RoomComponentIds 字段，
+//       确保客户端建房后能依据服务端权威清单进行装配。
+// ════════════════════════════════════════════════════════════════
+
+using StellarNet.Shared.Protocol;
 
 namespace StellarNet.Shared.Protocol.BuiltIn
 {
@@ -7,9 +15,6 @@ namespace StellarNet.Shared.Protocol.BuiltIn
     // 框架保留号段：2000 - 2999
     // 覆盖：创建房间、加入房间、离开房间、获取房间列表、获取房间信息、获取成员列表
     // 所有房间调度协议属于全局域，不依赖当前房间归属上下文
-    // 注意：
-    //   S2C_MemberJoined / S2C_MemberLeft 属于房间内部成员状态变化，
-    //   已迁移到 RoomBaseSettingsBuiltInMessages.cs，由房间基础设置组件负责承载。
     // ────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -58,6 +63,13 @@ namespace StellarNet.Shared.Protocol.BuiltIn
         /// 创建成功时的房间 RoomId，客户端凭此进入房间装配流程。
         /// </summary>
         public string RoomId;
+
+        /// <summary>
+        /// [关键字段] 房间业务组件清单。
+        /// 服务端创建房间时会强制挂载 RoomBaseSettings 等基础组件。
+        /// 客户端必须使用此清单进行本地装配，严禁在本地硬编码默认组件。
+        /// </summary>
+        public string[] RoomComponentIds;
 
         /// <summary>
         /// 失败原因，仅在 Success=false 时有效。
@@ -124,6 +136,17 @@ namespace StellarNet.Shared.Protocol.BuiltIn
         /// 当前所在房间的 RoomId，服务端用于校验房间归属一致性。
         /// </summary>
         public string RoomId;
+    }
+
+    /// <summary>
+    /// 服务端返回离开房间结果。
+    /// 属于全局域下行协议（因为离房后已无房间上下文）。
+    /// 用于通知客户端状态机安全切换回大厅。
+    /// </summary>
+    [MessageId(2005)]
+    public sealed class S2C_LeaveRoomResult : S2CGlobalMessage
+    {
+        public bool Success;
     }
 
     /// <summary>

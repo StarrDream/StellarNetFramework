@@ -1,6 +1,15 @@
-﻿using System;
+﻿// ════════════════════════════════════════════════════════════════
+// 文件：MirrorClientAdapter.cs
+// 路径：Assets/StellarNetFramework/Runtime/Client/Adapter/MirrorClientAdapter.cs
+// 职责：Mirror 客户端网络适配器。
+//       修正：移除私有 FrameworkRawMessage 定义，使用 Shared.Network.FrameworkRawMessage，
+//       解决类型哈希不匹配导致的 "failed to unpack" 错误。
+// ════════════════════════════════════════════════════════════════
+
+using System;
 using Mirror;
 using StellarNet.Shared.Envelope;
+using StellarNet.Shared.Network; // 引入 Shared 命名空间
 using StellarNet.Shared.Serialization;
 using UnityEngine;
 
@@ -60,6 +69,7 @@ namespace StellarNet.Client.Adapter
 
             networkAddress = serverAddress;
 
+            // 使用 Shared 层定义的 FrameworkRawMessage，确保 ID 一致
             if (!_isHandlerRegistered)
             {
                 NetworkClient.RegisterHandler<FrameworkRawMessage>(OnMirrorMessageReceived);
@@ -118,6 +128,7 @@ namespace StellarNet.Client.Adapter
                 return;
             }
 
+            // 使用 Shared 层定义的 FrameworkRawMessage
             var rawMsg = new FrameworkRawMessage { Data = envelopeBytes };
             NetworkClient.Send(rawMsg);
         }
@@ -161,11 +172,6 @@ namespace StellarNet.Client.Adapter
             }
 
             OnDataReceived?.Invoke(envelope);
-        }
-
-        private struct FrameworkRawMessage : NetworkMessage
-        {
-            public byte[] Data;
         }
     }
 }

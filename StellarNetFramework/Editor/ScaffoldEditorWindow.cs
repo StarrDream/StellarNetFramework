@@ -8,6 +8,7 @@
 //       集成 ProtocolScanner 实现开发期协议 ID 查重与自动建议。
 // ════════════════════════════════════════════════════════════════
 
+using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
@@ -1237,6 +1238,7 @@ namespace StellarNet.Editor.Scaffold
                 GenerateTarget.BothSides => "双端",
                 GenerateTarget.ClientOnly => "仅客户端",
                 GenerateTarget.ServerOnly => "仅服务端",
+                _ => throw new ArgumentOutOfRangeException()
             };
         }
 

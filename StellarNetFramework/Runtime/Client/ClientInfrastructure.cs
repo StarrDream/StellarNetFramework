@@ -1,4 +1,13 @@
-﻿using System.Collections.Generic;
+﻿// ════════════════════════════════════════════════════════════════
+// 文件：ClientInfrastructure.cs
+// 路径：Assets/StellarNetFramework/Runtime/Client/ClientInfrastructure.cs
+// 职责：客户端基础设施装配与生命周期管理。
+//       修正：OnCreateRoomSucceeded 不再使用硬编码默认组件，
+//       而是使用服务端下发的组件清单进行装配，确保“所见即所得”。
+// ════════════════════════════════════════════════════════════════
+
+using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using StellarNet.Client.Adapter;
 using StellarNet.Client.Config;
@@ -9,7 +18,7 @@ using StellarNet.Client.GlobalModules.RoomDispatcher;
 using StellarNet.Client.GlobalModules.User;
 using StellarNet.Client.Network;
 using StellarNet.Client.Room;
-using StellarNet.Client.Room.Components; // 引入组件命名空间
+using StellarNet.Client.Room.Components;
 using StellarNet.Client.Sender;
 using StellarNet.Client.Session;
 using StellarNet.Client.State;
@@ -20,14 +29,10 @@ using UnityEngine;
 
 namespace StellarNet.Client
 {
-    /// <summary>
-    /// 客户端全局装配入口，是整个客户端框架的唯一启动点与生命周期宿主。
-    /// 负责按正确依赖顺序创建所有客户端基础设施对象、完成依赖注入、绑定事件与发起连接。
-    /// 引入了 GlobalClientManager 与 ClientStateProtocolFilter 完成状态机闭环。
-    /// </summary>
     public sealed class ClientInfrastructure : MonoBehaviour
     {
-        [Header("配置文件路径")] [SerializeField] private string _configFilePath = "Config/ClientNetConfig.json";
+        [Header("配置加载路径 (支持 @StreamingAssets 等标记)")]
+        public string ConfigLoadPath;
 
         [Header("Mirror 客户端适配器引用")] [SerializeField]
         private MirrorClientAdapter _mirrorAdapter;
@@ -81,14 +86,9 @@ namespace StellarNet.Client
 
         private void Update()
         {
-            if (!_isInitialized)
-            {
-                return;
-            }
-
+            if (!_isInitialized) return;
             float deltaTime = Time.deltaTime;
             _reconnectHandle?.Tick(deltaTime);
-
             _globalClientManager?.CurrentRoom?.Tick(deltaTime);
             _globalClientManager?.ReplayController?.Tick(deltaTime);
         }
@@ -100,17 +100,20 @@ namespace StellarNet.Client
 
         private void Initialize()
         {
-            _configManager = new ClientNetConfigManager(_configFilePath);
+            // 解析路径标记并拼接文件名
+            string folderPath = ResolveConfigPath(ConfigLoadPath);
+            string fullJsonPath = Path.Combine(folderPath, "ClientNetConfig.json");
+
+            _configManager = new ClientNetConfigManager(fullJsonPath);
             var config = _configManager.Current;
             if (config == null)
             {
-                Debug.LogError($"[ClientInfrastructure] Initialize 失败：物体 {name} 的 ClientNetConfig 为空。");
+                Debug.LogError($"[ClientInfrastructure] Initialize 失败：无法从路径加载配置: {fullJsonPath}");
                 return;
             }
 
             _serializer = new NewtonsoftJsonSerializer();
             _messageRegistry = BuildMessageRegistry();
-
             _sessionContext = new ClientSessionContext();
             _globalClientManager = new GlobalClientManager(_sessionContext);
             _protocolFilter = new ClientStateProtocolFilter(_globalClientManager);
@@ -118,7 +121,6 @@ namespace StellarNet.Client
             _globalRegistrar = new ClientGlobalMessageRegistrar(_globalRouter);
             _clientComponentRegistry = new ClientRoomComponentRegistry();
 
-            // 注册客户端组件工厂
             RegisterClientComponents();
 
             if (_serializer == null || _messageRegistry == null || _sessionContext == null ||
@@ -174,7 +176,30 @@ namespace StellarNet.Client
             _mirrorAdapter.Connect(config.ServerAddress, config.ServerPort);
 
             _isInitialized = true;
-            Debug.Log($"[ClientInfrastructure] 客户端装配完成，正在连接 {config.ServerAddress}:{config.ServerPort}，物体={name}。");
+            Debug.Log(
+                $"[ClientInfrastructure] 客户端装配完成，正在连接 {config.ServerAddress}:{config.ServerPort}，配置源: {fullJsonPath}");
+        }
+
+        private string ResolveConfigPath(string rawPath)
+        {
+            if (string.IsNullOrEmpty(rawPath))
+                return Path.Combine(Application.streamingAssetsPath, "ClientNetConfig");
+
+            string path = rawPath.Replace("\\", "/");
+            if (path.StartsWith("@StreamingAssets"))
+            {
+                return path.Replace("@StreamingAssets", Application.streamingAssetsPath);
+            }
+            else if (path.StartsWith("@PersistentData"))
+            {
+                return path.Replace("@PersistentData", Application.persistentDataPath);
+            }
+            else if (path.StartsWith("@DataPath"))
+            {
+                return path.Replace("@DataPath", Application.dataPath);
+            }
+
+            return path;
         }
 
         private MessageRegistry BuildMessageRegistry()
@@ -242,13 +267,8 @@ namespace StellarNet.Client
             _lobbyChatHandle.RegisterAll();
         }
 
-        /// <summary>
-        /// 注册所有客户端业务组件工厂。
-        /// 修复：在此处注册 RoomBaseSettings 组件。
-        /// </summary>
         private void RegisterClientComponents()
         {
-            // 注册房间基础设置组件
             _clientComponentRegistry.Register(
                 ClientRoomBaseSettingsHandle.StableComponentId,
                 room => new ClientRoomBaseSettingsHandle()
@@ -291,12 +311,17 @@ namespace StellarNet.Client
         private void OnLoginSuccess(string sessionId) => _globalClientManager.TransitionToLobby();
         private void OnKickedOut(string reason) => _globalClientManager.TransitionToDisconnected();
 
-        private void OnCreateRoomSucceeded(string roomId)
+        private void OnCreateRoomSucceeded(string roomId, string[] components)
         {
-            // 建房成功后，默认至少包含基础设置组件
-            // 实际项目中协议应携带组件列表，这里做防御性兜底
-            string[] defaultComponents = new[] { ClientRoomBaseSettingsHandle.StableComponentId };
-            PerformRoomAssembly(roomId, defaultComponents);
+            // [关键修改] 不再使用硬编码的 defaultComponents
+            // 直接使用服务端下发的 components 列表进行装配
+            // 确保创建者与加入者的房间结构完全一致
+            if (components == null || components.Length == 0)
+            {
+                Debug.LogWarning($"[ClientInfrastructure] 建房成功但组件列表为空，将装配空房间。RoomId={roomId}");
+            }
+
+            PerformRoomAssembly(roomId, components);
         }
 
         private void OnJoinRoomSucceeded(string roomId, string[] components)
@@ -308,8 +333,8 @@ namespace StellarNet.Client
         {
             var room = new ClientRoomInstance(roomId);
             var assembler = new ClientRoomAssembler(_clientComponentRegistry.GetRegistry());
-            bool success = assembler.Assemble(room, components);
 
+            bool success = assembler.Assemble(room, components);
             if (!success)
             {
                 Debug.LogError($"[ClientInfrastructure] 房间装配失败，无法进入房间。RoomId={roomId}");
@@ -324,30 +349,21 @@ namespace StellarNet.Client
 
         private void OnReconnectSucceeded(string targetState)
         {
-            if (targetState == "InRoom")
-            {
-                // 重连逻辑暂未完全接入组件清单，仅切换状态
-                _globalClientManager.TransitionToRoom();
-            }
-            else
-            {
-                _globalClientManager.TransitionToLobby();
-            }
+            if (targetState == "InRoom") _globalClientManager.TransitionToRoom();
+            else _globalClientManager.TransitionToLobby();
         }
 
         private void OnReconnectFailed(string reason) => _globalClientManager.TransitionToDisconnected();
 
         private void Shutdown()
         {
-            if (!_isInitialized)
-            {
-                return;
-            }
-
+            if (!_isInitialized) return;
             _isInitialized = false;
+
             Debug.Log($"[ClientInfrastructure] 开始关停客户端，物体={name}。");
 
             UnbindStateTransitions();
+
             _userHandle?.UnregisterAll();
             _reconnectHandle?.UnregisterAll();
             _roomDispatcherHandle?.UnregisterAll();

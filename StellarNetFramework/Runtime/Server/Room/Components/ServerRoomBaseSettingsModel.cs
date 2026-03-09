@@ -1,4 +1,12 @@
-﻿using System.Collections.Generic;
+﻿// ════════════════════════════════════════════════════════════════
+// 文件：ServerRoomBaseSettingsModel.cs
+// 路径：Assets/StellarNetFramework/Runtime/Server/Room/Components/ServerRoomBaseSettingsModel.cs
+// 职责：房间基础设置组件 Model，纯状态层。
+//       负责维护房间成员列表、房主标识与可开始状态。
+//       新增：维护房间名与最大人数（从配置蓝图初始化）。
+// ════════════════════════════════════════════════════════════════
+
+using System.Collections.Generic;
 using StellarNet.Shared.Protocol.BuiltIn;
 
 namespace StellarNet.Server.Room.BuiltIn
@@ -13,8 +21,23 @@ namespace StellarNet.Server.Room.BuiltIn
         private readonly Dictionary<string, RoomMemberSnapshot> _memberMap =
             new Dictionary<string, RoomMemberSnapshot>();
 
+        // 运行时动态状态
         public string OwnerSessionId { get; private set; } = string.Empty;
         public bool CanStart { get; private set; } = false;
+
+        // [新增] 静态配置状态（由 Init 时读取配置蓝图写入）
+        public string RoomName { get; private set; } = string.Empty;
+        public int MaxMemberCount { get; private set; } = 0;
+
+        /// <summary>
+        /// 初始化基础信息，由 Handle 在 Init 阶段调用。
+        /// </summary>
+        public void SetBaseInfo(string roomName, string ownerSessionId, int maxMemberCount)
+        {
+            RoomName = roomName ?? string.Empty;
+            OwnerSessionId = ownerSessionId ?? string.Empty;
+            MaxMemberCount = maxMemberCount;
+        }
 
         public void AddOrUpdateMember(string sessionId, bool isOnline, bool isReady)
         {
@@ -119,6 +142,8 @@ namespace StellarNet.Server.Room.BuiltIn
             _memberMap.Clear();
             OwnerSessionId = string.Empty;
             CanStart = false;
+            // RoomName 和 MaxMemberCount 通常不需要在 Clear 中重置，
+            // 因为 Deinit 会销毁整个 Model 实例，下次 Init 会创建新的。
         }
 
         private static RoomMemberSnapshot CloneSnapshot(RoomMemberSnapshot source)

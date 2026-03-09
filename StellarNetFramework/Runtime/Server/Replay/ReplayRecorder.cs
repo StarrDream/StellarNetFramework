@@ -286,7 +286,7 @@ namespace StellarNet.Server.Replay
         /// 停止录制，等待异步写入线程完成剩余帧落盘，然后写入回放文件并完成 MD5 校验写入。
         /// 设置明确超时上限（5秒），超时后强制继续销毁流程，不无限等待。
         /// </summary>
-        public void Finalize()
+        public void OnFinalize()
         {
             _isRecording = false;
             _isRunning = false;
