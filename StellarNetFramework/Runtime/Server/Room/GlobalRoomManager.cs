@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
 using StellarNet.Server.Replay;
 using StellarNet.Server.Room.Services;
 using StellarNet.Server.Session;
@@ -426,6 +427,29 @@ namespace StellarNet.Server.Room
                     Debug.Log($"[GlobalRoomManager] 会话房间绑定已清除，SessionId={sessionId}，RoomId={room.RoomId}。");
                 }
             }
+        }
+
+        /// <summary>
+        /// 获取分页的活跃房间列表。
+        /// </summary>
+        public List<RoomInstance> GetPagedRoomList(int pageIndex, int pageSize, out int totalCount)
+        {
+            // 1. 筛选活跃房间 (Running 状态)
+            // 这里可以根据需求扩展筛选条件，比如只返回 WaitingForStart 阶段的房间
+            var activeRooms = _allRooms
+                .Where(r => r.LifecycleState == RoomLifecycleState.Running)
+                .ToList();
+
+            totalCount = activeRooms.Count;
+
+            // 2. 执行分页
+            if (pageIndex < 0) pageIndex = 0;
+            if (pageSize <= 0) pageSize = 10;
+
+            return activeRooms
+                .Skip(pageIndex * pageSize)
+                .Take(pageSize)
+                .ToList();
         }
 
         private void CollectDestroyedRooms()

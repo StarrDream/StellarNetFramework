@@ -14,6 +14,7 @@ namespace StellarNet.Client.GlobalModules.User
     public sealed class ClientUserHandle
     {
         private readonly ClientUserModel _model;
+        public ClientUserModel Model => _model;
         private readonly ClientSessionContext _sessionContext;
         private readonly ClientGlobalMessageRegistrar _registrar;
 

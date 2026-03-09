@@ -13,6 +13,9 @@ namespace StellarNet.Client.GlobalModules.LobbyChat
     public sealed class ClientLobbyChatHandle
     {
         private readonly ClientLobbyChatModel _model;
+
+        public ClientLobbyChatModel Model => _model;
+
         private readonly ClientGlobalMessageRegistrar _registrar;
 
         // 收到新聊天消息事件，供 View 层订阅
@@ -33,6 +36,7 @@ namespace StellarNet.Client.GlobalModules.LobbyChat
                 Debug.LogError("[ClientLobbyChatHandle] 构造失败：model 为 null。");
                 return;
             }
+
             if (registrar == null)
             {
                 Debug.LogError("[ClientLobbyChatHandle] 构造失败：registrar 为 null。");

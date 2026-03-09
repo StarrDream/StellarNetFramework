@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Globalization;
 using StellarNet.Client.Network;
 using UnityEngine;
 
@@ -72,6 +73,8 @@ namespace StellarNet.Client.Room
         /// </summary>
         public ClientScopeServiceLocator RoomServiceLocator { get; }
 
+        public string CurrentTick { get; set; }
+
         private readonly List<IClientRoomComponent> _components = new List<IClientRoomComponent>();
 
         public ClientRoomInstance(string roomId)
@@ -125,6 +128,8 @@ namespace StellarNet.Client.Room
             {
                 _components[i].OnTick(deltaTime);
             }
+
+            CurrentTick = deltaTime.ToString(CultureInfo.InvariantCulture);
         }
 
         public void Destroy()

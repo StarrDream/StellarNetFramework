@@ -44,6 +44,25 @@ namespace StellarNet.Server.Room
         private readonly HashSet<string> _memberSessionIds = new HashSet<string>();
 
         /// <summary>
+        /// [快捷访问] 获取房间最大人数。
+        /// 尝试将 Settings 转换为通用配置读取，若转换失败则返回默认值。
+        /// </summary>
+        public int MaxMemberCount
+        {
+            get
+            {
+                // 尝试转换为通用设置
+                if (Settings is StellarNet.Server.Room.Settings.GeneralRoomSettings general)
+                {
+                    return general.MaxMemberCount;
+                }
+
+                // 如果是自定义的 Settings 类型，这里可能需要根据具体业务扩展
+                return 0; // 0 表示不限制或读取失败
+            }
+        }
+
+        /// <summary>
         /// 当前在线连接映射：SessionId → ConnectionId，表示当前有哪些有效连接在线附着。
         /// 重连接管时可发生替换，房间空置超时判断针对此映射是否为空。
         /// 广播目标计算默认基于此映射，不基于纯成员身份集合。

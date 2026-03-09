@@ -1,11 +1,5 @@
-﻿// ════════════════════════════════════════════════════════════════
-// 文件：RoomDispatcherHandle.cs
-// 路径：Assets/StellarNetFramework/Runtime/Server/GlobalModules/RoomDispatcher/RoomDispatcherHandle.cs
-// 职责：房间调度模块 Handle。
-//       修正：OnC2S_CreateRoom 中，创建房间后获取实际装配的组件列表，
-//       并填入 S2C_CreateRoomResult 下发给客户端，实现服务端权威同步。
-// ════════════════════════════════════════════════════════════════
-
+﻿using System;
+using System.Linq;
 using StellarNet.Server.Idempotent;
 using StellarNet.Server.Network;
 using StellarNet.Server.Room;
@@ -42,48 +36,6 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
             ServerRoomMessageSender roomSender,
             GlobalMessageRegistrar registrar)
         {
-            if (sessionManager == null)
-            {
-                Debug.LogError("[RoomDispatcherHandle] 构造失败：sessionManager 为 null。");
-                return;
-            }
-
-            if (roomManager == null)
-            {
-                Debug.LogError("[RoomDispatcherHandle] 构造失败：roomManager 为 null。");
-                return;
-            }
-
-            if (model == null)
-            {
-                Debug.LogError("[RoomDispatcherHandle] 构造失败：model 为 null。");
-                return;
-            }
-
-            if (idempotentCache == null)
-            {
-                Debug.LogError("[RoomDispatcherHandle] 构造失败：idempotentCache 为 null。");
-                return;
-            }
-
-            if (globalSender == null)
-            {
-                Debug.LogError("[RoomDispatcherHandle] 构造失败：globalSender 为 null。");
-                return;
-            }
-
-            if (roomSender == null)
-            {
-                Debug.LogError("[RoomDispatcherHandle] 构造失败：roomSender 为 null。");
-                return;
-            }
-
-            if (registrar == null)
-            {
-                Debug.LogError("[RoomDispatcherHandle] 构造失败：registrar 为 null。");
-                return;
-            }
-
             _sessionManager = sessionManager;
             _roomManager = roomManager;
             _model = model;
@@ -98,7 +50,7 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
             _registrar
                 .Register<C2S_CreateRoom>(OnC2S_CreateRoom)
                 .Register<C2S_JoinRoom>(OnC2S_JoinRoom)
-                .Register<C2S_LeaveRoom>(OnC2S_LeaveRoom)
+                .Register<C2S_LeaveRoom>(OnC2S_LeaveRoom) // [新增] 处理全局离房请求
                 .Register<C2S_GetRoomList>(OnC2S_GetRoomList)
                 .Register<C2S_GetRoomInfo>(OnC2S_GetRoomInfo);
         }
@@ -116,163 +68,104 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
         private void OnC2S_CreateRoom(ConnectionId connectionId, C2S_CreateRoom message)
         {
             var session = _sessionManager.GetSessionByConnectionId(connectionId);
-            if (session == null)
-            {
-                Debug.LogError($"[RoomDispatcherHandle] 建房失败：ConnectionId={connectionId} 未绑定有效会话。");
-                return;
-            }
+            if (session == null) return;
 
             if (string.IsNullOrEmpty(message.IdempotentToken))
             {
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 建房失败：IdempotentToken 为空，SessionId={session.SessionId}，ConnectionId={connectionId}。");
                 SendCreateRoomFail(session.SessionId, "IdempotentToken 不能为空");
                 return;
             }
 
-            // 1. 幂等性检查
             if (_idempotentCache.TryGetResult(message.IdempotentToken, out var cachedResult))
             {
-                var cachedResponse = cachedResult as S2C_CreateRoomResult;
-                if (cachedResponse != null)
+                if (cachedResult is S2C_CreateRoomResult cachedResponse)
                 {
                     _globalSender.SendToSession(session.SessionId, cachedResponse);
-                    Debug.Log(
-                        $"[RoomDispatcherHandle] 建房幂等命中，复用缓存结果，Token={message.IdempotentToken}，SessionId={session.SessionId}。");
                 }
-
                 return;
             }
 
-            if (!_idempotentCache.TryOccupy(message.IdempotentToken))
-            {
-                Debug.LogWarning(
-                    $"[RoomDispatcherHandle] 建房请求正在处理中，Token={message.IdempotentToken}，SessionId={session.SessionId}，已忽略。");
-                return;
-            }
+            if (!_idempotentCache.TryOccupy(message.IdempotentToken)) return;
 
-            // 2. 状态检查
             if (session.IsInRoom)
             {
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 建房失败：SessionId={session.SessionId} 当前已在房间 {session.CurrentRoomId} 中，不允许重复建房。");
                 var failResult = new S2C_CreateRoomResult { Success = false, FailReason = "当前已在房间中" };
                 _idempotentCache.SetResult(message.IdempotentToken, failResult);
                 _globalSender.SendToSession(session.SessionId, failResult);
                 return;
             }
 
-            if (!_model.TryMarkCreating(session.SessionId))
-            {
-                Debug.LogWarning($"[RoomDispatcherHandle] 建房并发重入，SessionId={session.SessionId}，已忽略。");
-                return;
-            }
+            if (!_model.TryMarkCreating(session.SessionId)) return;
 
-            // 3. 执行建房
             var roomId = StellarNet.Shared.Identity.RoomId.Generate(message.RoomName ?? "Room");
             var settings = BuildRoomSettings(message, roomId.Value);
-
             if (settings == null)
             {
                 _model.ClearCreating(session.SessionId);
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 建房失败：IRoomSettings 构建失败，SessionId={session.SessionId}，RoomId={roomId.Value}。");
                 var failResult = new S2C_CreateRoomResult { Success = false, FailReason = "房间配置构建失败" };
                 _idempotentCache.SetResult(message.IdempotentToken, failResult);
                 _globalSender.SendToSession(session.SessionId, failResult);
                 return;
             }
 
-            // 获取默认组件清单（包含 RoomBaseSettings）
-            // 即使客户端没有请求任何组件，这里也会强制加入基础组件
             string[] componentIds = GetDefaultRoomComponentIds();
             var room = _roomManager.CreateRoom(roomId.Value, settings, componentIds);
-
             if (room == null)
             {
                 _model.ClearCreating(session.SessionId);
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 建房失败：GlobalRoomManager.CreateRoom 返回 null，SessionId={session.SessionId}，RoomId={roomId.Value}。");
                 var failResult = new S2C_CreateRoomResult { Success = false, FailReason = "房间创建失败" };
                 _idempotentCache.SetResult(message.IdempotentToken, failResult);
                 _globalSender.SendToSession(session.SessionId, failResult);
                 return;
             }
 
-            // 4. 成员加入与绑定
-            room.AddMember(session.SessionId, connectionId);
-            session.BindRoom(roomId.Value);
-
-            bool notifyJoinedSuccess = _roomManager.TryNotifyRoomMemberJoined(roomId.Value, session.SessionId);
-            if (!notifyJoinedSuccess)
-            {
-                _model.ClearCreating(session.SessionId);
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 建房失败：房间骨架成员加入通知失败，SessionId={session.SessionId}，RoomId={roomId.Value}。");
-                _roomManager.DestroyRoom(roomId.Value, "建房后骨架同步失败");
-                var failResult = new S2C_CreateRoomResult { Success = false, FailReason = "房间骨架初始化失败" };
-                _idempotentCache.SetResult(message.IdempotentToken, failResult);
-                _globalSender.SendToSession(session.SessionId, failResult);
-                return;
-            }
-
-            _model.ClearCreating(session.SessionId);
-
-            // 5. [关键] 获取最终装配的组件清单，下发给客户端
-            // 客户端必须依赖此清单进行本地装配，而不是揣测默认组件
+            // 1. 发送回执 (Global)
             string[] actualComponentIds = room.GetComponentIds();
-
             var successResult = new S2C_CreateRoomResult
             {
                 Success = true,
                 RoomId = roomId.Value,
-                RoomComponentIds = actualComponentIds ?? new string[0], // 填充字段
+                RoomComponentIds = actualComponentIds ?? new string[0],
                 FailReason = string.Empty
             };
-
             _idempotentCache.SetResult(message.IdempotentToken, successResult);
             _globalSender.SendToSession(session.SessionId, successResult);
 
-            Debug.Log(
-                $"[RoomDispatcherHandle] 建房成功，RoomId={roomId.Value}，SessionId={session.SessionId}，组件数={actualComponentIds?.Length}。");
+            // 2. 加入房间 (Room)
+            room.AddMember(session.SessionId, connectionId);
+            session.BindRoom(roomId.Value);
+            bool notifyJoinedSuccess = _roomManager.TryNotifyRoomMemberJoined(roomId.Value, session.SessionId);
+            _model.ClearCreating(session.SessionId);
+
+            if (!notifyJoinedSuccess)
+            {
+                _roomManager.DestroyRoom(roomId.Value, "建房后骨架同步失败");
+            }
         }
 
         private void OnC2S_JoinRoom(ConnectionId connectionId, C2S_JoinRoom message)
         {
             var session = _sessionManager.GetSessionByConnectionId(connectionId);
-            if (session == null)
-            {
-                Debug.LogError($"[RoomDispatcherHandle] 加房失败：ConnectionId={connectionId} 未绑定有效会话。");
-                return;
-            }
+            if (session == null) return;
 
             if (string.IsNullOrEmpty(message.RoomId))
             {
-                Debug.LogError($"[RoomDispatcherHandle] 加房失败：RoomId 为空，SessionId={session.SessionId}。");
                 SendJoinRoomFail(session.SessionId, "RoomId 不能为空");
                 return;
             }
 
             if (session.IsInRoom)
             {
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 加房失败：SessionId={session.SessionId} 当前已在房间 {session.CurrentRoomId} 中。");
                 SendJoinRoomFail(session.SessionId, "当前已在房间中");
                 return;
             }
 
-            if (!_model.TryMarkJoining(session.SessionId))
-            {
-                Debug.LogWarning($"[RoomDispatcherHandle] 加房并发重入，SessionId={session.SessionId}，已忽略。");
-                return;
-            }
+            if (!_model.TryMarkJoining(session.SessionId)) return;
 
             var room = _roomManager.GetRoom(message.RoomId);
             if (room == null)
             {
                 _model.ClearJoining(session.SessionId);
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 加房失败：RoomId={message.RoomId} 不存在，SessionId={session.SessionId}。");
                 SendJoinRoomFail(session.SessionId, "房间不存在");
                 return;
             }
@@ -280,30 +173,18 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
             if (!ValidateRoomPassword(room, message.Password))
             {
                 _model.ClearJoining(session.SessionId);
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 加房失败：密码错误，RoomId={message.RoomId}，SessionId={session.SessionId}。");
                 SendJoinRoomFail(session.SessionId, "房间密码错误");
                 return;
             }
 
-            room.AddMember(session.SessionId, connectionId);
-            session.BindRoom(message.RoomId);
-
-            bool notifyJoinedSuccess = _roomManager.TryNotifyRoomMemberJoined(message.RoomId, session.SessionId);
-            if (!notifyJoinedSuccess)
+            if (room.MemberCount >= room.MaxMemberCount)
             {
-                room.RemoveMember(session.SessionId);
-                session.UnbindRoom();
                 _model.ClearJoining(session.SessionId);
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 加房失败：房间骨架成员加入通知失败，RoomId={message.RoomId}，SessionId={session.SessionId}。");
-                SendJoinRoomFail(session.SessionId, "房间骨架同步失败");
+                SendJoinRoomFail(session.SessionId, "房间已满");
                 return;
             }
 
-            _model.ClearJoining(session.SessionId);
-
-            // 加入成功，下发组件清单
+            // 1. 发送回执 (Global)
             string[] componentIds = room.GetComponentIds();
             var joinResult = new S2C_JoinRoomResult
             {
@@ -314,76 +195,53 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
             };
             _globalSender.SendToSession(session.SessionId, joinResult);
 
-            Debug.Log($"[RoomDispatcherHandle] 加房成功，RoomId={message.RoomId}，SessionId={session.SessionId}。");
+            // 2. 加入房间 (Room)
+            room.AddMember(session.SessionId, connectionId);
+            session.BindRoom(message.RoomId);
+            bool notifyJoinedSuccess = _roomManager.TryNotifyRoomMemberJoined(message.RoomId, session.SessionId);
+            _model.ClearJoining(session.SessionId);
+
+            if (!notifyJoinedSuccess)
+            {
+                room.RemoveMember(session.SessionId);
+                session.UnbindRoom();
+                var kickMsg = new S2C_KickedFromRoom { RoomId = message.RoomId, ByOwnerSessionId = "System" };
+                _globalSender.SendToSessionWithTargetRoom(session.SessionId, kickMsg, message.RoomId);
+            }
         }
 
+        // [新增] 处理全局离房请求
         private void OnC2S_LeaveRoom(ConnectionId connectionId, C2S_LeaveRoom message)
         {
             var session = _sessionManager.GetSessionByConnectionId(connectionId);
-            if (session == null)
-            {
-                Debug.LogError($"[RoomDispatcherHandle] 离房失败：ConnectionId={connectionId} 未绑定有效会话。");
-                return;
-            }
+            if (session == null) return;
 
+            // 1. 校验状态
             if (!session.IsInRoom)
             {
-                Debug.LogWarning($"[RoomDispatcherHandle] 离房请求：SessionId={session.SessionId} 当前不在任何房间中，已忽略。");
+                // 容错：如果服务端认为不在房间，直接返回成功让客户端切回大厅
                 _globalSender.SendToSession(session.SessionId, new S2C_LeaveRoomResult { Success = true });
                 return;
             }
 
             string roomId = session.CurrentRoomId;
-            var room = _roomManager.GetRoom(roomId);
-            if (room == null)
-            {
-                session.UnbindRoom();
-                Debug.LogWarning(
-                    $"[RoomDispatcherHandle] 离房时目标房间已不存在，SessionId={session.SessionId}，RoomId={roomId}，已清空房间绑定。");
-                _globalSender.SendToSession(session.SessionId, new S2C_LeaveRoomResult { Success = true });
-                return;
-            }
+            
+            // 2. 执行移除
+            // GlobalRoomManager.RemoveMember 会触发 RoomBaseSettings.NotifyMemberLeft
+            // 进而触发房间内广播 S2C_MemberLeft
+            _roomManager.RemoveMember(session.SessionId, "主动离开");
 
-            // 1. 广播成员离开消息给房间内其他人
-            var memberLeft = new S2C_MemberLeft
-            {
-                SessionId = session.SessionId,
-                Reason = "主动离开"
-            };
-            _roomSender.BroadcastToRoom(roomId, memberLeft);
-
-            // 2. 执行逻辑移除
-            room.RemoveMember(session.SessionId);
-            session.UnbindRoom();
-
-            // 3. 通知房间骨架组件（处理房主转让等）
-            bool notifyLeftSuccess = _roomManager.TryNotifyRoomMemberLeft(roomId, session.SessionId, "主动离开");
-            if (!notifyLeftSuccess)
-            {
-                Debug.LogError(
-                    $"[RoomDispatcherHandle] 离房后房间骨架成员离开通知失败，RoomId={roomId}，SessionId={session.SessionId}。");
-            }
-
-            // 4. 发送离房成功结果给请求者，闭环客户端状态机
+            // 3. 发送全局回执
+            // 通知请求者本人切换状态机到 InLobby
             _globalSender.SendToSession(session.SessionId, new S2C_LeaveRoomResult { Success = true });
 
-            // 5. 检查销毁
-            if (room.MemberCount == 0)
-            {
-                _roomManager.DestroyRoom(roomId, "所有成员已离开");
-            }
-
-            Debug.Log($"[RoomDispatcherHandle] 离房成功，RoomId={roomId}，SessionId={session.SessionId}。");
+            Debug.Log($"[RoomDispatcherHandle] 离房处理完成，RoomId={roomId}，SessionId={session.SessionId}。");
         }
 
         private void OnC2S_GetRoomList(ConnectionId connectionId, C2S_GetRoomList message)
         {
             var session = _sessionManager.GetSessionByConnectionId(connectionId);
-            if (session == null)
-            {
-                Debug.LogError($"[RoomDispatcherHandle] 获取房间列表失败：ConnectionId={connectionId} 未绑定有效会话。");
-                return;
-            }
+            if (session == null) return;
 
             var rooms = GetRoomList(message.PageIndex, message.PageSize, out int totalCount);
             var result = new S2C_RoomListResult
@@ -397,17 +255,9 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
         private void OnC2S_GetRoomInfo(ConnectionId connectionId, C2S_GetRoomInfo message)
         {
             var session = _sessionManager.GetSessionByConnectionId(connectionId);
-            if (session == null)
-            {
-                Debug.LogError($"[RoomDispatcherHandle] 获取房间信息失败：ConnectionId={connectionId} 未绑定有效会话。");
-                return;
-            }
+            if (session == null) return;
 
-            if (string.IsNullOrEmpty(message.RoomId))
-            {
-                Debug.LogError($"[RoomDispatcherHandle] 获取房间信息失败：RoomId 为空，SessionId={session.SessionId}。");
-                return;
-            }
+            if (string.IsNullOrEmpty(message.RoomId)) return;
 
             var room = _roomManager.GetRoom(message.RoomId);
             if (room == null)
@@ -433,7 +283,7 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
             {
                 Success = false,
                 RoomId = string.Empty,
-                RoomComponentIds = new string[0],
+                RoomComponentIds = Array.Empty<string>(),
                 FailReason = reason
             };
             _globalSender.SendToSession(sessionId, result);
@@ -450,10 +300,6 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
             };
         }
 
-        /// <summary>
-        /// 返回房间出厂默认组件清单。
-        /// 房间基础设置组件属于骨架级强制挂载组件，默认房间不允许缺失此组件。
-        /// </summary>
         protected virtual string[] GetDefaultRoomComponentIds()
         {
             return new[]
@@ -464,8 +310,32 @@ namespace StellarNet.Server.GlobalModules.RoomDispatcher
 
         protected virtual RoomBriefInfo[] GetRoomList(int pageIndex, int pageSize, out int totalCount)
         {
-            totalCount = 0;
-            return new RoomBriefInfo[0];
+            var rooms = _roomManager.GetPagedRoomList(pageIndex, pageSize, out totalCount);
+            var result = new RoomBriefInfo[rooms.Count];
+            for (int i = 0; i < rooms.Count; i++)
+            {
+                var r = rooms[i];
+                string roomName = "Unknown Room";
+                int maxMembers = 0;
+                bool hasPassword = false;
+
+                if (r.Settings is GeneralRoomSettings generalSettings)
+                {
+                    roomName = generalSettings.RoomName;
+                    maxMembers = generalSettings.MaxMemberCount;
+                    hasPassword = !string.IsNullOrEmpty(generalSettings.Password);
+                }
+
+                result[i] = new RoomBriefInfo
+                {
+                    RoomId = r.RoomId,
+                    RoomName = roomName,
+                    CurrentMemberCount = r.MemberCount,
+                    MaxMemberCount = maxMembers,
+                    HasPassword = hasPassword
+                };
+            }
+            return result;
         }
 
         protected virtual bool ValidateRoomPassword(RoomInstance room, string inputPassword)

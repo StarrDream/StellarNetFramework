@@ -1,12 +1,4 @@
-﻿// ════════════════════════════════════════════════════════════════
-// 文件：RoomDispatchBuiltInMessages.cs
-// 路径：Assets/StellarNetFramework/Runtime/Shared/Protocol/BuiltIn/Room/RoomDispatchBuiltInMessages.cs
-// 职责：房间调度模块内置协议定义。
-//       修正：S2C_CreateRoomResult 增加 RoomComponentIds 字段，
-//       确保客户端建房后能依据服务端权威清单进行装配。
-// ════════════════════════════════════════════════════════════════
-
-using StellarNet.Shared.Protocol;
+﻿using StellarNet.Shared.Protocol;
 
 namespace StellarNet.Shared.Protocol.BuiltIn
 {
@@ -127,13 +119,14 @@ namespace StellarNet.Shared.Protocol.BuiltIn
 
     /// <summary>
     /// 客户端请求主动离开当前房间。
-    /// 属于房间域上行协议，必须绑定有效房间上下文。
+    /// [修正] 属于全局域上行协议。
+    /// 虽然语义上是离开"当前房间"，但处理者是 Global 层的 RoomDispatcher。
     /// </summary>
     [MessageId(2004)]
-    public sealed class C2S_LeaveRoom : C2SRoomMessage
+    public sealed class C2S_LeaveRoom : C2SGlobalMessage
     {
         /// <summary>
-        /// 当前所在房间的 RoomId，服务端用于校验房间归属一致性。
+        /// 当前所在房间的 RoomId，服务端用于校验。
         /// </summary>
         public string RoomId;
     }
@@ -255,11 +248,11 @@ namespace StellarNet.Shared.Protocol.BuiltIn
 
     /// <summary>
     /// 服务端通知房间已被销毁或强制解散。
-    /// 属于房间域下行协议，广播给当前房间全体成员。
+    /// [修正] 属于全局域下行协议，广播给当前房间全体成员。
     /// 客户端收到后必须清理局内实例并回到大厅态。
     /// </summary>
     [MessageId(2013)]
-    public sealed class S2C_RoomDismissed : S2CRoomMessage
+    public sealed class S2C_RoomDismissed : S2CGlobalMessage
     {
         /// <summary>
         /// 解散原因：房主解散、服务器关闭、空置超时等。

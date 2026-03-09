@@ -84,9 +84,10 @@ namespace StellarNet.Shared.Protocol.BuiltIn
         public string NewOwnerSessionId;
     }
 
+
     /// <summary>
     /// 客户端（房主）请求踢出指定成员。
-    /// 属于房间域上行协议，仅房主有权限操作。
+    /// [保持] 属于房间域上行协议，仅房主有权限操作。
     /// </summary>
     [MessageId(6004)]
     public sealed class C2S_KickRoomMember : C2SRoomMessage
@@ -101,10 +102,11 @@ namespace StellarNet.Shared.Protocol.BuiltIn
 
     /// <summary>
     /// 服务端通知被踢出的成员本人。
-    /// 属于房间域下行协议，单播给被踢出的成员。
+    /// [修正] 属于全局域下行协议，因为收到此消息意味着状态机即将切换回大厅。
+    /// 不依赖房间上下文，由 ClientRoomDispatcherHandle 处理。
     /// </summary>
     [MessageId(6005)]
-    public sealed class S2C_KickedFromRoom : S2CRoomMessage
+    public sealed class S2C_KickedFromRoom : S2CGlobalMessage
     {
         public string RoomId;
 

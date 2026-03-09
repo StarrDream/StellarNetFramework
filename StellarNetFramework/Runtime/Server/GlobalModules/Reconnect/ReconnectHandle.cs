@@ -9,12 +9,6 @@ using UnityEngine;
 
 namespace StellarNet.Server.GlobalModules.Reconnect
 {
-    /// <summary>
-    /// 断线重连模块 Handle，处理重连请求与房间连接接管流程。
-    /// 重连是原会话与原房间上下文的权威恢复流程，不是重新登录一次。
-    /// 执行顺序：SessionId 校验 → 防并发重入 → 会话接管 → 房间连接映射替换 → 房间骨架恢复通知 → 下发结果。
-    /// 全局模块不直接穿透房间内部组件，而是通过 GlobalRoomManager 统一代理访问。
-    /// </summary>
     public sealed class ReconnectHandle : IGlobalService
     {
         private readonly SessionManager _sessionManager;
@@ -89,23 +83,20 @@ namespace StellarNet.Server.GlobalModules.Reconnect
             var session = _sessionManager.GetSessionById(message.SessionId);
             if (session == null)
             {
-                Debug.LogError(
-                    $"[ReconnectHandle] 重连失败：SessionId={message.SessionId} 不存在或已过期，ConnectionId={connectionId}。");
+                Debug.LogError($"[ReconnectHandle] 重连失败：SessionId={message.SessionId} 不存在或已过期，ConnectionId={connectionId}。");
                 SendReconnectFail(connectionId, "会话不存在或已过期，请重新登录");
                 return;
             }
 
             if (_model.IsReconnecting(message.SessionId))
             {
-                Debug.LogWarning(
-                    $"[ReconnectHandle] 重连请求重复触发，SessionId={message.SessionId}，ConnectionId={connectionId}，已忽略。");
+                Debug.LogWarning($"[ReconnectHandle] 重连请求重复触发，SessionId={message.SessionId}，ConnectionId={connectionId}，已忽略。");
                 return;
             }
 
             if (!_model.TryMarkReconnecting(message.SessionId))
             {
-                Debug.LogWarning(
-                    $"[ReconnectHandle] 重连标记失败，SessionId={message.SessionId}，ConnectionId={connectionId}，已忽略。");
+                Debug.LogWarning($"[ReconnectHandle] 重连标记失败，SessionId={message.SessionId}，ConnectionId={connectionId}，已忽略。");
                 return;
             }
 
@@ -113,8 +104,7 @@ namespace StellarNet.Server.GlobalModules.Reconnect
             if (!takeoverSuccess)
             {
                 _model.ClearReconnecting(message.SessionId);
-                Debug.LogError(
-                    $"[ReconnectHandle] 重连失败：会话接管失败，SessionId={message.SessionId}，ConnectionId={connectionId}。");
+                Debug.LogError($"[ReconnectHandle] 重连失败：会话接管失败，SessionId={message.SessionId}，ConnectionId={connectionId}。");
                 SendReconnectFail(connectionId, "会话接管失败，请重新登录");
                 return;
             }
@@ -130,15 +120,8 @@ namespace StellarNet.Server.GlobalModules.Reconnect
                 {
                     room.UpdateMemberConnection(message.SessionId, connectionId);
 
-                    bool notifyRecoveredSuccess =
-                        _roomManager.TryNotifyRoomReconnectRecovered(targetRoomId, message.SessionId);
-                    if (!notifyRecoveredSuccess)
-                    {
-                        Debug.LogError(
-                            $"[ReconnectHandle] 重连失败：房间骨架恢复通知失败，SessionId={message.SessionId}，RoomId={targetRoomId}，ConnectionId={connectionId}。");
-                        session.UnbindRoom();
-                        targetRoomId = string.Empty;
-                    }
+                    // [修复] 移除此处立即下发房间快照的逻辑
+                    // 改为等待客户端装配完成后发送 C2S_ReconnectRoomReady，再由 ServerRoomBaseSettingsHandle 下发
 
                     roomComponentIds = room.GetComponentIds();
                 }
@@ -146,12 +129,12 @@ namespace StellarNet.Server.GlobalModules.Reconnect
                 {
                     session.UnbindRoom();
                     targetRoomId = string.Empty;
-                    Debug.LogWarning(
-                        $"[ReconnectHandle] 重连时目标房间已不存在，SessionId={message.SessionId}，原 RoomId={originalRoomId}，已清空房间绑定。");
+                    Debug.LogWarning($"[ReconnectHandle] 重连时目标房间已不存在，SessionId={message.SessionId}，原 RoomId={originalRoomId}，已清空房间绑定。");
                 }
             }
 
             string targetState = string.IsNullOrEmpty(targetRoomId) ? "InLobby" : "InRoom";
+
             var result = new S2C_ReconnectResult
             {
                 Success = true,
@@ -164,8 +147,7 @@ namespace StellarNet.Server.GlobalModules.Reconnect
             _globalSender.SendToSession(message.SessionId, result);
             _model.ClearReconnecting(message.SessionId);
 
-            Debug.Log(
-                $"[ReconnectHandle] 重连成功，SessionId={message.SessionId}，ConnectionId={connectionId}，TargetState={targetState}，TargetRoomId={targetRoomId}。");
+            Debug.Log($"[ReconnectHandle] 重连成功，SessionId={message.SessionId}，ConnectionId={connectionId}，TargetState={targetState}，TargetRoomId={targetRoomId}。");
         }
 
         private void SendReconnectFail(ConnectionId connectionId, string reason)
